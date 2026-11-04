@@ -8,20 +8,81 @@
   <link rel="stylesheet" href="vendor/xterm/xterm.css" />
 </head>
 <body>
-  <div class="app">
-    <aside class="sidebar">
-      <div class="brand"><span class="dot"></span> SahabatMobile</div>
-      <nav class="nav">
-        <button class="nav-item active" data-view="chat">Chat</button>
-        <button class="nav-item" data-view="workspace">Workspace</button>
-        <button class="nav-item" data-view="remote">Remote SSH</button>
-        <button class="nav-item" data-view="models">Model</button>
-        <button class="nav-item" data-view="api">API &amp; Snippet</button>
-      </nav>
-      <div class="modes">
-        <div class="mode active"><span>Developer</span><em>aktif</em></div>
-        <div class="mode soon"><span>UMKM</span><em>segera</em></div>
-        <div class="mode soon"><span>3D Creator</span><em>segera</em></div>
+  <div class="app no-side" id="app">
+    <div class="activitybar">
+      <button class="act active" data-view="chat" title="Chat">
+        <svg viewBox="0 0 24 24"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.5 8.6 8.6 0 0 1-3.8-.9L3 21l1.9-5.6A8.6 8.6 0 0 1 4 11.5 8.4 8.4 0 0 1 12.5 3 8.4 8.4 0 0 1 21 11.5z"/></svg>
+      </button>
+      <button class="act" data-view="workspace" title="Developer / Explorer">
+        <svg viewBox="0 0 24 24"><polyline points="8 6 2 12 8 18"/><polyline points="16 6 22 12 16 18"/></svg>
+      </button>
+      <button class="act" data-view="models" title="Model">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      </button>
+      <button class="act" data-view="api" title="API &amp; Snippet">
+        <svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+      </button>
+      <div class="act-spacer"></div>
+      <button class="act" id="actSettings" title="Pengaturan">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      </button>
+    </div>
+
+    <aside class="sidepanel" id="sidepanel">
+      <div id="explorerPane" class="side-section">
+        <div class="side-title">
+          <span>EXPLORER</span>
+          <div class="side-actions">
+            <button id="newFile" class="icon-btn" title="File baru">+</button>
+            <button id="newFolder" class="icon-btn" title="Folder baru">⊞</button>
+            <button id="refreshExplorer" class="icon-btn" title="Muat ulang">⟳</button>
+          </div>
+        </div>
+        <div class="target-bar">
+          <select id="targetSelect" title="Target explorer"></select>
+          <button id="newConnection" class="icon-btn" title="Koneksi SSH / FTP baru">＋</button>
+        </div>
+        <div class="root-path small muted" id="wsRoot">Belum ada folder</div>
+        <div id="fileTree" class="tree"></div>
+        <div class="quick-actions">
+          <button id="openFolder" class="ghost small">Open Folder</button>
+          <button id="cloneRepo" class="ghost small">Clone Repo</button>
+          <button id="disconnectRemote" class="ghost small hidden">Disconnect</button>
+        </div>
+        <div class="side-status" id="sideStatus">Siap</div>
+      </div>
+
+      <div id="connectionPane" class="side-section hidden">
+        <div class="side-title">
+          <span>KONEKSI BARU</span>
+          <button id="closeConnection" class="icon-btn" title="Tutup">×</button>
+        </div>
+        <form id="connForm" class="conn-form">
+          <label>Protokol
+            <select id="connProtocol">
+              <option value="sftp">SSH / SFTP</option>
+              <option value="ftp">FTP</option>
+              <option value="ftps">FTPS</option>
+            </select>
+          </label>
+          <label>Host / IP
+            <input id="connHost" placeholder="103.150.1.2" required />
+          </label>
+          <label>Port
+            <input id="connPort" type="number" value="22" />
+          </label>
+          <label>Username
+            <input id="connUser" placeholder="root" required />
+          </label>
+          <label>Password
+            <input id="connPassword" type="password" placeholder="••••••" />
+          </label>
+          <label id="connKeyField" class="hidden">Private Key
+            <input id="connKey" placeholder="C:\Users\...\.ssh\id_rsa" />
+          </label>
+          <button type="submit" class="primary small" id="connSubmit">Hubungkan</button>
+          <p class="hint" id="connHint">Password tidak disimpan. Untuk SSH bisa memakai private key.</p>
+        </form>
       </div>
     </aside>
 
@@ -49,85 +110,46 @@
 
       <section id="view-workspace" class="view hidden">
         <div class="workspace">
-          <div class="ws-files">
-            <div class="pane-head">
-              <span>EXPLORER</span>
-              <button id="openFolder" class="ghost small">Buka Folder</button>
-            </div>
-            <div class="root-path small muted" id="wsRoot">Belum ada folder</div>
-            <div id="fileTree" class="tree"></div>
-          </div>
-
           <div class="ws-editor">
             <div class="tabbar" id="tabbar"></div>
             <div id="editor" class="editor"></div>
-            <div class="terminal-pane" id="localTermPane">
+            <div class="terminal-pane" id="termPane">
               <div class="pane-head">
                 <span>TERMINAL</span>
                 <div class="pane-actions">
+                  <span id="termLabel" class="small muted"></span>
                   <button id="termClear" class="ghost small">Bersihkan</button>
                   <button id="termToggle" class="ghost small">–</button>
                 </div>
               </div>
               <div id="termLocal" class="term-host"></div>
+              <div id="termRemote" class="term-host hidden"></div>
+              <div id="termBlocked" class="term-blocked hidden">FTP tidak mendukung terminal. Gunakan koneksi SSH untuk terminal remote.</div>
             </div>
           </div>
 
           <div class="ws-agent">
             <div class="pane-head">
               <span>AGENT</span>
-              <label class="mini-check"><input type="checkbox" id="allowCmd" /> izinkan perintah</label>
+              <span id="agentTarget" class="agent-target">lokal</span>
             </div>
-            <div id="agentLog" class="agent-log"></div>
+            <div id="agentLog" class="agent-log">
+              <div class="agent-empty">
+                <div class="agent-empty-title">Agent</div>
+                <p>Memahami tugas kompleks, memperbaiki bug, dan membuat project baru.</p>
+                <ul>
+                  <li>Membaca dan menulis file di explorer aktif</li>
+                  <li>Menjalankan perintah (dengan konfirmasi)</li>
+                  <li>Bekerja di folder lokal, SSH/SFTP, atau FTP</li>
+                </ul>
+              </div>
+            </div>
             <div class="agent-input">
-              <textarea id="agentInput" rows="3" placeholder="Minta agen membaca/mengubah file atau menjalankan perintah di folder ini..."></textarea>
+              <textarea id="agentInput" rows="3" placeholder="Minta agen memperbaiki atau membuat project di explorer aktif..."></textarea>
               <div class="actions">
+                <label class="mini-check"><input type="checkbox" id="allowCmd" /> izinkan perintah</label>
                 <span id="agentStatus" class="status small"></span>
                 <button id="agentSend" class="primary small">Kirim</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section id="view-remote" class="view hidden">
-        <div class="remote">
-          <form id="sshForm" class="ssh-form">
-            <div class="field"><label>Host / IP</label><input id="sshHost" placeholder="mis. 103.150.1.2" required /></div>
-            <div class="field" style="max-width:90px"><label>Port</label><input id="sshPort" type="number" value="22" /></div>
-            <div class="field"><label>Username</label><input id="sshUser" placeholder="root" required /></div>
-            <div class="field"><label>Auth</label>
-              <select id="sshAuth">
-                <option value="password">Password</option>
-                <option value="key">Private Key</option>
-              </select>
-            </div>
-            <div class="field grow" id="sshPassField"><label>Password</label><input id="sshPassword" type="password" placeholder="••••••" /></div>
-            <div class="field grow hidden" id="sshKeyField"><label>Path Private Key</label><input id="sshKey" placeholder="C:\Users\...\.ssh\id_rsa" /></div>
-            <button id="sshConnect" type="submit" class="primary">Hubungkan</button>
-            <button id="sshDisconnect" type="button" class="ghost hidden">Putuskan</button>
-          </form>
-          <div class="remote-body">
-            <div class="ws-files">
-              <div class="pane-head">
-                <span>REMOTE FILES</span>
-                <button id="sshRefresh" class="ghost small">Refresh</button>
-              </div>
-              <div id="sshRoot" class="root-path small muted">Belum terhubung</div>
-              <div id="sshTree" class="tree"></div>
-            </div>
-            <div class="ws-editor">
-              <div class="tabbar" id="rtabbar"></div>
-              <div id="reditor" class="editor"></div>
-              <div class="terminal-pane" id="sshTermPane">
-                <div class="pane-head">
-                  <span>SSH TERMINAL</span>
-                  <div class="pane-actions">
-                    <button id="sshTermClear" class="ghost small">Bersihkan</button>
-                    <button id="sshTermToggle" class="ghost small">–</button>
-                  </div>
-                </div>
-                <div id="sshTerm" class="term-host"></div>
               </div>
             </div>
           </div>
@@ -194,6 +216,36 @@
       <div class="modal-actions">
         <button id="cancelSettings" class="ghost">Batal</button>
         <button id="saveSettings" class="primary">Simpan</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="promptModal" class="modal hidden">
+    <div class="modal-card">
+      <h3 id="promptTitle">Nama</h3>
+      <input id="promptInput" placeholder="" autocomplete="off" />
+      <div class="modal-actions">
+        <button id="promptCancel" class="ghost">Batal</button>
+        <button id="promptOk" class="primary">Buat</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="cloneModal" class="modal hidden">
+    <div class="modal-card">
+      <h3>Clone Git Repository</h3>
+      <label>URL Repository
+        <input id="cloneUrl" placeholder="https://github.com/user/repo.git" autocomplete="off" />
+      </label>
+      <label>Folder Tujuan
+        <div class="field-row" style="margin:0">
+          <div class="value grow" id="cloneDir" style="flex:1">Belum dipilih</div>
+          <button id="clonePick" class="ghost">Pilih</button>
+        </div>
+      </label>
+      <div class="modal-actions">
+        <button id="cloneCancel" class="ghost">Batal</button>
+        <button id="cloneStart" class="primary">Clone</button>
       </div>
     </div>
   </div>

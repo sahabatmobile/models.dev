@@ -2,13 +2,7 @@
   'use strict';
 
   const api = window.sahabat;
-  const VIEW_TITLES = {
-    chat: 'Chat',
-    workspace: 'Workspace Developer',
-    remote: 'Remote SSH',
-    models: 'Model',
-    api: 'API & Snippet'
-  };
+  const VIEW_TITLES = { chat: 'Chat', workspace: 'Workspace Developer', models: 'Model', api: 'API & Snippet' };
   const MODE_MAP = {
     js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
     ts: 'typescript', tsx: 'typescript', py: 'python', html: 'html', htm: 'html',
@@ -23,27 +17,27 @@
       type: 'function',
       function: {
         name: 'list_dir',
-        description: 'Lihat isi sebuah folder di workspace. Path relatif terhadap root workspace.',
-        parameters: { type: 'object', properties: { path: { type: 'string', description: 'Path folder, mis. "." atau "src"' } }, required: ['path'] }
+        description: 'Lihat isi folder pada explorer aktif (lokal/SSH/FTP).',
+        parameters: { type: 'object', properties: { path: { type: 'string', description: 'Path folder, mis. "."' } }, required: ['path'] }
       }
     },
     {
       type: 'function',
       function: {
         name: 'read_file',
-        description: 'Baca isi file teks di workspace.',
-        parameters: { type: 'object', properties: { path: { type: 'string', description: 'Path file relatif terhadap root' } }, required: ['path'] }
+        description: 'Baca isi file teks pada explorer aktif.',
+        parameters: { type: 'object', properties: { path: { type: 'string', description: 'Path file' } }, required: ['path'] }
       }
     },
     {
       type: 'function',
       function: {
         name: 'write_file',
-        description: 'Tulis atau timpa file di workspace dengan isi baru. Gunakan untuk membuat/mengubah kode.',
+        description: 'Tulis atau buat file pada explorer aktif. Gunakan untuk membuat/memperbaiki kode.',
         parameters: {
           type: 'object',
           properties: {
-            path: { type: 'string', description: 'Path file relatif terhadap root' },
+            path: { type: 'string', description: 'Path file' },
             content: { type: 'string', description: 'Isi file lengkap yang baru' }
           },
           required: ['path', 'content']
@@ -54,12 +48,12 @@
       type: 'function',
       function: {
         name: 'run_command',
-        description: 'Jalankan perintah shell di workspace (PowerShell di Windows). Akan dikonfirmasi pengguna.',
+        description: 'Jalankan perintah shell (lokal atau SSH). Akan dikonfirmasi pengguna. Tidak tersedia untuk FTP.',
         parameters: {
           type: 'object',
           properties: {
             command: { type: 'string', description: 'Perintah yang akan dijalankan' },
-            cwd: { type: 'string', description: 'Direktori kerja relatif terhadap root, opsional' }
+            cwd: { type: 'string', description: 'Direktori kerja, opsional' }
           },
           required: ['command']
         }
@@ -75,43 +69,28 @@
     chat: [],
     busy: false,
     requestId: null,
-    workspace: { root: null, tree: [] },
-    local: { editor: null, tabs: [], active: null, term: null, fit: null, termId: null, expanded: new Set() },
+    local: { root: null, tree: [], expanded: new Set() },
+    target: { type: 'local', id: null },
+    connections: [],
+    remotes: new Map(),
+    editor: null,
+    tabs: [],
+    active: null,
+    terms: { local: { term: null, fit: null, id: null, cwd: null }, remote: { term: null, fit: null, sessionId: null } },
     agent: { messages: [], busy: false },
-    ssh: { id: null, dir: null, editor: null, tabs: [], active: null, term: null, fit: null }
+    snippet: 'curl',
+    cloneDir: null
   };
 
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const baseName = (p) => String(p || '').split(/[\\/]/).pop();
   const dirName = (p) => String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p;
+  const joinRemote = (dir, name) => (String(dir).replace(/\/+$/, '') || '') + '/' + name;
 
   function modeFor(name) {
     const ext = String(name || '').split('.').pop().toLowerCase();
     return 'ace/mode/' + (MODE_MAP[ext] || 'text');
-  }
-
-  function aceSetup() {
-    ace.config.set('basePath', 'vendor/ace');
-    ace.config.set('modePath', 'vendor/ace');
-    ace.config.set('themePath', 'vendor/ace');
-    ace.config.set('workerPath', 'vendor/ace');
-  }
-
-  function makeEditor(elId) {
-    const editor = ace.edit(elId);
-    editor.setTheme('ace/theme/tomorrow_night');
-    editor.session.setUseWorker(false);
-    editor.setOptions({
-      fontSize: '13px',
-      fontFamily: 'Consolas, ui-monospace, monospace',
-      showPrintMargin: false,
-      useSoftTabs: true,
-      tabSize: 2,
-      wrap: false,
-      highlightActiveLine: true
-    });
-    return editor;
   }
 
   function toast(msg) {
@@ -131,10 +110,6 @@
       badge.textContent = 'Key belum diisi';
       badge.className = 'badge off';
     }
-  }
-
-  function setStatus(text) {
-    $('chatStatus').textContent = text || '';
   }
 
   function currentModel() {
@@ -176,229 +151,408 @@
   // ---------- Views ----------
   function switchView(view) {
     S.view = view;
-    document.querySelectorAll('.nav-item').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
+    document.querySelectorAll('.act[data-view]').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
     document.querySelectorAll('.view').forEach((v) => v.classList.add('hidden'));
     const target = $('view-' + view);
     if (target) target.classList.remove('hidden');
     $('viewTitle').textContent = VIEW_TITLES[view] || view;
-    if (view === 'workspace') ensureLocalWorkspace();
-    if (view === 'remote') ensureRemoteEditor();
+    $('app').classList.toggle('no-side', view !== 'workspace');
+    if (view === 'workspace') {
+      ensureWorkspace();
+    }
     if (view === 'models' && S.settings.hasKey) renderModelList();
     setTimeout(() => {
       fitAll();
-      try { S.local.editor && S.local.editor.resize(true); } catch {}
-      try { S.ssh.editor && S.ssh.editor.resize(true); } catch {}
+      try { S.editor && S.editor.resize(true); } catch {}
     }, 80);
   }
 
-  // ---------- Chat ----------
-  function chatAdd(role, text) {
-    const empty = $('chat').querySelector('.empty');
-    if (empty) empty.remove();
-    const row = document.createElement('div');
-    row.className = 'message ' + role;
-    row.innerHTML = '<div class="avatar">' + (role === 'user' ? 'You' : role === 'error' ? '!' : 'AI') + '</div><div class="bubble"></div>';
-    row.querySelector('.bubble').textContent = text;
-    $('chat').appendChild(row);
-    $('chat').scrollTop = $('chat').scrollHeight;
-    return row.querySelector('.bubble');
+  // ---------- Explorer ----------
+  function targetValue() {
+    return S.target.type === 'local' ? 'local' : S.target.id;
   }
 
-  async function sendChat() {
-    const input = $('chatInput');
-    const text = input.value.trim();
-    if (!text || S.busy) return;
-    if (!S.settings.hasKey) { openSettings(); return; }
-    input.value = '';
-    S.busy = true;
-    $('sendChat').classList.add('hidden');
-    $('stopChat').classList.remove('hidden');
-    setStatus('Menghubungi model...');
-    S.chat.push({ role: 'user', content: text });
-    chatAdd('user', text);
-    const bubble = chatAdd('assistant', '');
-    const requestId = 'req-' + Date.now();
-    S.requestId = requestId;
-    let full = '';
-    const offChunk = api.onChunk((d) => {
-      if (d.requestId !== requestId) return;
-      full += d.delta || '';
-      bubble.textContent = full;
-      $('chat').scrollTop = $('chat').scrollHeight;
-      setStatus('Mengetik...');
-    });
-    const offDone = api.onDone((d) => {
-      if (d.requestId !== requestId) return;
-      cleanup();
-      if (d.aborted) {
-        setStatus('Dihentikan');
-      } else {
-        S.chat.push({ role: 'assistant', content: full });
-        setStatus('');
-      }
-    });
-    const offErr = api.onError((d) => {
-      if (d.requestId !== requestId) return;
-      cleanup();
-      bubble.parentElement.classList.add('error');
-      bubble.textContent = d.message || 'Terjadi kesalahan.';
-      setStatus('');
-    });
-    function cleanup() {
-      offChunk(); offDone(); offErr();
-      S.busy = false;
-      S.requestId = null;
-      $('sendChat').classList.remove('hidden');
-      $('stopChat').classList.add('hidden');
+  function renderTargetSelect() {
+    const sel = $('targetSelect');
+    sel.innerHTML = '';
+    const localOpt = document.createElement('option');
+    localOpt.value = 'local';
+    localOpt.textContent = 'Lokal';
+    sel.appendChild(localOpt);
+    for (const c of S.connections) {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.label;
+      sel.appendChild(opt);
     }
-    const res = await api.startChat({
-      requestId,
-      model: currentModel(),
-      messages: S.chat.slice(-20)
-    });
-    if (!res.ok) {
-      cleanup();
-      bubble.parentElement.classList.add('error');
-      bubble.textContent = (res.error && res.error.message) || 'Gagal mengirim.';
-      setStatus('');
-    }
+    sel.value = targetValue();
   }
 
-  // ---------- Workspace: tree ----------
-  function renderTree(container, nodes, depth) {
-    container.innerHTML = '';
+  function setSideStatus(text) {
+    $('sideStatus').textContent = text;
+  }
+
+  function remoteSession() {
+    if (S.target.type === 'local') return null;
+    return S.remotes.get(S.target.id) || null;
+  }
+
+  function renderLocalTree() {
+    $('fileTree').innerHTML = '';
+    if (!S.local.root) {
+      $('wsRoot').textContent = 'Belum ada folder';
+      const hint = document.createElement('div');
+      hint.className = 'tree-empty';
+      hint.textContent = 'Buka folder atau clone repository untuk mulai.';
+      $('fileTree').appendChild(hint);
+      return;
+    }
+    $('wsRoot').textContent = S.local.root;
+    renderTreeNodes(S.local.tree, 0);
+  }
+
+  function renderTreeNodes(nodes, depth) {
+    const box = $('fileTree');
     for (const node of nodes) {
       const row = document.createElement('div');
       row.className = 'tree-row';
-      row.style.paddingLeft = 6 + depth * 14 + 'px';
-      row.dataset.path = node.path;
+      row.style.paddingLeft = 8 + depth * 14 + 'px';
+      row.title = node.path;
       if (node.dir) {
         const open = S.local.expanded.has(node.path);
         row.innerHTML = '<span class="caret">' + (open ? '▾' : '▸') + '</span><span class="fname">' + esc(node.name) + '</span>';
         row.addEventListener('click', () => {
           if (S.local.expanded.has(node.path)) S.local.expanded.delete(node.path);
           else S.local.expanded.add(node.path);
-          renderTree(container, nodes, depth);
+          $('fileTree').innerHTML = '';
+          renderTreeNodes(S.local.tree, 0);
         });
-        container.appendChild(row);
-        if (open) renderTree(container, node.children || [], depth + 1);
+        row.addEventListener('contextmenu', (e) => removeEntry(e, node));
+        box.appendChild(row);
+        if (open) renderTreeNodes(node.children || [], depth + 1);
       } else {
         row.innerHTML = '<span class="caret">·</span><span class="fname">' + esc(node.name) + '</span>';
-        row.addEventListener('click', () => openLocalFile(node.path));
-        container.appendChild(row);
+        row.addEventListener('click', () => openFile(node.path));
+        row.addEventListener('contextmenu', (e) => removeEntry(e, node));
+        box.appendChild(row);
       }
     }
   }
 
-  function loadWorkspaceTree(tree) {
-    S.workspace.tree = tree || [];
-    renderTree($('fileTree'), S.workspace.tree, 0);
+  function renderRemoteTree(dir, items) {
+    $('fileTree').innerHTML = '';
+    $('wsRoot').textContent = dir;
+    const session = remoteSession();
+    const status = session ? session.type.toUpperCase() + ' · ' + dir : dir;
+    setSideStatus(status);
+    if (dir && dir !== '/') {
+      const up = document.createElement('div');
+      up.className = 'tree-row';
+      up.innerHTML = '<span class="caret">↑</span><span class="fname">..</span>';
+      up.addEventListener('click', () => {
+        const parent = dir.replace(/\/+[^/]+\/?$/, '') || '/';
+        loadRemoteDir(parent);
+      });
+      $('fileTree').appendChild(up);
+    }
+    for (const item of items) {
+      const row = document.createElement('div');
+      row.className = 'tree-row';
+      row.title = item.path;
+      row.innerHTML = '<span class="caret">' + (item.dir ? '▸' : '·') + '</span><span class="fname">' + esc(item.name) + '</span>';
+      row.addEventListener('click', () => {
+        if (item.dir) loadRemoteDir(item.path);
+        else openFile(item.path);
+      });
+      row.addEventListener('contextmenu', (e) => removeEntry(e, item));
+      $('fileTree').appendChild(row);
+    }
   }
 
-  async function ensureLocalWorkspace() {
-    if (!S.local.editor) {
-      S.local.editor = makeEditor('editor');
-      S.local.editor.commands.addCommand({
+  async function removeEntry(e, node) {
+    e.preventDefault();
+    const session = remoteSession();
+    const where = session ? session.type.toUpperCase() : 'lokal';
+    if (!confirm('Hapus ' + (node.dir ? 'folder ' : 'file ') + node.name + ' dari explorer ' + where + '?')) return;
+    const res = session
+      ? await api.remoteRemove(session.id, node.path, node.dir)
+      : await api.removeFile(node.path);
+    if (!res.ok) { toast(res.error || 'Gagal menghapus'); return; }
+    await refreshExplorer();
+    toast('Dihapus: ' + node.name);
+  }
+
+  async function refreshExplorer() {
+    if (S.target.type === 'local') {
+      if (!S.local.root) { renderLocalTree(); return; }
+      const info = await api.workspaceTree();
+      if (info.ok) { S.local.tree = info.tree; S.local.root = info.root; }
+      renderLocalTree();
+      setSideStatus('Lokal · ' + (S.local.root || '-'));
+    } else {
+      const session = remoteSession();
+      if (!session) return;
+      await loadRemoteDir(session.dir || session.home);
+    }
+  }
+
+  async function loadRemoteDir(dir) {
+    const session = remoteSession();
+    if (!session) return;
+    const res = await api.remoteListDir(session.id, dir);
+    if (!res.ok) { toast(res.error || 'Gagal membaca folder remote'); return; }
+    session.dir = res.dir;
+    renderRemoteTree(res.dir, res.items);
+  }
+
+  function updateExplorerChrome() {
+    const remote = S.target.type !== 'local';
+    $('disconnectRemote').classList.toggle('hidden', !remote);
+    $('openFolder').classList.toggle('hidden', remote);
+    $('cloneRepo').classList.toggle('hidden', remote);
+    $('newFile').disabled = false;
+    $('newFolder').disabled = false;
+    $('agentTarget').textContent = remote
+      ? (S.target.type.toUpperCase() + ' ' + (remoteSession() ? remoteSession().label.replace(/^(SSH|FTP) /, '') : ''))
+      : 'lokal';
+  }
+
+  async function ensureWorkspace() {
+    if (!S.editor) {
+      S.editor = makeEditor('editor');
+      S.editor.commands.addCommand({
         name: 'save',
         bindKey: { win: 'Ctrl-S', mac: 'Cmd-S' },
-        exec: () => saveActiveLocal()
+        exec: () => saveActive()
       });
     }
-    initLocalTerminal();
-    if (!S.workspace.root) {
-      const info = await api.workspaceInfo();
-      if (info.ok) {
-        S.workspace.root = info.root;
-        $('wsRoot').textContent = info.root;
-        loadWorkspaceTree(info.tree);
+    ensureLocalTerminal();
+    updateExplorerChrome();
+    if (S.target.type === 'local') {
+      if (!S.local.root) {
+        const info = await api.workspaceInfo();
+        if (info.ok) {
+          S.local.root = info.root;
+          S.local.tree = info.tree;
+        }
       }
+      renderLocalTree();
+      setSideStatus('Lokal · ' + (S.local.root || 'belum ada folder'));
+      showTerminal('local');
     } else {
-      const info = await api.workspaceTree();
-      if (info.ok) loadWorkspaceTree(info.tree);
+      const session = remoteSession();
+      if (session) {
+        await loadRemoteDir(session.dir || session.home);
+        showTerminal(session.type === 'ssh' ? 'remote' : 'blocked');
+      }
     }
-    setTimeout(() => { try { S.local.fit && S.local.fit.fit(); } catch {} }, 80);
+    setTimeout(() => { try { S.terms.local.fit && S.terms.local.fit.fit(); } catch {} }, 80);
   }
 
-  async function openFolder() {
-    const res = await api.openFolder();
-    if (!res.ok) return;
-    S.workspace.root = res.root;
-    S.local.expanded.clear();
-    $('wsRoot').textContent = res.root;
-    loadWorkspaceTree(res.tree);
-    if (S.local.termId) {
-      api.stopTerminal(S.local.termId);
-      S.local.termId = null;
+  async function switchTarget(value) {
+    if (value === 'local') {
+      S.target = { type: 'local', id: null };
+    } else {
+      const conn = S.connections.find((c) => c.id === value);
+      if (!conn) return;
+      S.target = { type: conn.type, id: conn.id };
     }
-    startLocalTerminal(res.root);
-    toast('Folder dibuka: ' + dirName(res.root));
+    renderTargetSelect();
+    await ensureWorkspace();
   }
 
-  function renderLocalTabs() {
+  // ---------- Connection ----------
+  function openConnectionForm() {
+    $('explorerPane').classList.add('hidden');
+    $('connectionPane').classList.remove('hidden');
+    $('connProtocol').value = 'sftp';
+    $('connPort').value = '22';
+    $('connHost').value = '';
+    $('connUser').value = '';
+    $('connPassword').value = '';
+    $('connKey').value = '';
+    $('connKeyField').classList.remove('hidden');
+    setTimeout(() => $('connHost').focus(), 60);
+  }
+
+  function closeConnectionForm() {
+    $('connectionPane').classList.add('hidden');
+    $('explorerPane').classList.remove('hidden');
+  }
+
+  async function connectRemote(e) {
+    e.preventDefault();
+    const protocol = $('connProtocol').value;
+    const btn = $('connSubmit');
+    btn.disabled = true;
+    btn.textContent = 'Menghubungkan...';
+    const res = await api.remoteConnect({
+      protocol,
+      host: $('connHost').value.trim(),
+      port: Number($('connPort').value) || (protocol === 'sftp' ? 22 : 21),
+      username: $('connUser').value.trim(),
+      password: $('connPassword').value,
+      authType: protocol === 'sftp' && $('connKey').value.trim() ? 'key' : 'password',
+      privateKey: $('connKey').value.trim()
+    });
+    btn.disabled = false;
+    btn.textContent = 'Hubungkan';
+    if (!res.ok) { toast('Koneksi gagal: ' + (res.error || 'unknown')); return; }
+    const conn = { id: res.id, type: res.type, label: res.label, home: res.home, dir: res.home };
+    S.connections.push(conn);
+    S.remotes.set(res.id, conn);
+    renderTargetSelect();
+    closeConnectionForm();
+    await switchTarget(res.id);
+    switchView('workspace');
+    toast('Terhubung: ' + res.label);
+  }
+
+  async function disconnectRemote() {
+    if (S.target.type === 'local') return;
+    const id = S.target.id;
+    await api.remoteDisconnect(id);
+    S.connections = S.connections.filter((c) => c.id !== id);
+    S.remotes.delete(id);
+    S.tabs = S.tabs.filter((t) => t.target.id !== id);
+    if (S.active && S.active.target.id === id) {
+      S.active = S.tabs[S.tabs.length - 1] || null;
+      setActiveSession(S.active);
+    }
+    renderTabs();
+    S.target = { type: 'local', id: null };
+    renderTargetSelect();
+    await ensureWorkspace();
+    toast('Koneksi diputus');
+  }
+
+  // ---------- Editor ----------
+  function aceSetup() {
+    ace.config.set('basePath', 'vendor/ace');
+    ace.config.set('modePath', 'vendor/ace');
+    ace.config.set('themePath', 'vendor/ace');
+    ace.config.set('workerPath', 'vendor/ace');
+  }
+
+  function makeEditor(elId) {
+    const editor = ace.edit(elId);
+    editor.setTheme('ace/theme/tomorrow_night');
+    editor.session.setUseWorker(false);
+    editor.setOptions({
+      fontSize: '13px',
+      fontFamily: 'Consolas, ui-monospace, monospace',
+      showPrintMargin: false,
+      useSoftTabs: true,
+      tabSize: 2,
+      wrap: false,
+      highlightActiveLine: true
+    });
+    return editor;
+  }
+
+  function tabKey(target, filePath) {
+    return (target.id || 'local') + ':' + filePath;
+  }
+
+  function renderTabs() {
     const bar = $('tabbar');
     bar.innerHTML = '';
-    for (const tab of S.local.tabs) {
+    for (const tab of S.tabs) {
       const el = document.createElement('div');
-      el.className = 'tab' + (tab === S.local.active ? ' active' : '');
-      el.innerHTML = '<span class="tab-name">' + esc(tab.name) + (tab.dirty ? ' •' : '') + '</span><span class="tab-close">×</span>';
+      el.className = 'tab' + (tab === S.active ? ' active' : '');
+      const badge = tab.target.type === 'local' ? '' : '<span class="tab-badge">' + tab.target.type.toUpperCase() + '</span>';
+      el.innerHTML = badge + '<span class="tab-name">' + esc(tab.name) + (tab.dirty ? ' •' : '') + '</span><span class="tab-close">×</span>';
       el.addEventListener('click', (e) => {
-        if (e.target.classList.contains('tab-close')) { closeLocalTab(tab); return; }
-        activateLocalTab(tab);
+        if (e.target.classList.contains('tab-close')) { closeTab(tab); return; }
+        S.active = tab;
+        S.editor.setSession(tab.session);
+        renderTabs();
       });
       bar.appendChild(el);
     }
   }
 
-  function activateLocalTab(tab) {
-    S.local.active = tab;
-    S.local.editor.setSession(tab.session);
-    renderLocalTabs();
+  function setActiveSession(tab) {
+    if (tab) S.editor.setSession(tab.session);
+    else S.editor.setSession(ace.createEditSession(''));
   }
 
-  async function openLocalFile(filePath) {
-    const existing = S.local.tabs.find((t) => t.path === filePath);
-    if (existing) { activateLocalTab(existing); return; }
-    const res = await api.readFile(filePath);
+  async function openFile(filePath) {
+    const target = { type: S.target.type, id: S.target.id };
+    const key = tabKey(target, filePath);
+    const existing = S.tabs.find((t) => t.key === key);
+    if (existing) {
+      S.active = existing;
+      S.editor.setSession(existing.session);
+      renderTabs();
+      return;
+    }
+    const res = target.type === 'local'
+      ? await api.readFile(filePath)
+      : await api.remoteReadFile(target.id, filePath);
     if (!res.ok) { toast(res.error || 'Gagal membuka file'); return; }
     const session = ace.createEditSession(res.content);
     session.setMode(modeFor(filePath));
     session.setUseWorker(false);
-    const tab = { path: res.path, name: baseName(res.path), session, dirty: false };
-    session.on('change', () => {
-      if (!tab.dirty) { tab.dirty = true; renderLocalTabs(); }
-    });
-    S.local.tabs.push(tab);
-    activateLocalTab(tab);
+    const tab = { key, path: filePath, name: baseName(filePath), session, dirty: false, target };
+    session.on('change', () => { if (!tab.dirty) { tab.dirty = true; renderTabs(); } });
+    S.tabs.push(tab);
+    S.active = tab;
+    S.editor.setSession(session);
+    renderTabs();
   }
 
-  function closeLocalTab(tab) {
+  function closeTab(tab) {
     if (tab.dirty && !confirm('File "' + tab.name + '" belum disimpan. Tutup saja?')) return;
-    const idx = S.local.tabs.indexOf(tab);
-    S.local.tabs.splice(idx, 1);
-    if (S.local.active === tab) {
-      const next = S.local.tabs[Math.max(0, idx - 1)];
-      S.local.active = next || null;
-      if (next) S.local.editor.setSession(next.session);
-      else S.local.editor.setSession(ace.createEditSession(''));
+    const idx = S.tabs.indexOf(tab);
+    S.tabs.splice(idx, 1);
+    if (S.active === tab) {
+      S.active = S.tabs[Math.max(0, idx - 1)] || null;
+      setActiveSession(S.active);
     }
-    renderLocalTabs();
+    renderTabs();
   }
 
-  async function saveActiveLocal() {
-    const tab = S.local.active;
+  async function saveActive() {
+    const tab = S.active;
     if (!tab) return;
-    const res = await api.writeFile(tab.path, S.local.editor.getValue());
+    const content = S.editor.getValue();
+    const res = tab.target.type === 'local'
+      ? await api.writeFile(tab.path, content)
+      : await api.remoteWriteFile(tab.target.id, tab.path, content);
     if (!res.ok) { toast(res.error || 'Gagal menyimpan'); return; }
     tab.dirty = false;
-    renderLocalTabs();
-    const info = await api.workspaceTree();
-    if (info.ok) loadWorkspaceTree(info.tree);
+    renderTabs();
+    await refreshExplorer();
     toast('Tersimpan: ' + tab.name);
   }
 
-  // ---------- Workspace: terminal ----------
-  function initLocalTerminal() {
-    if (S.local.term) return;
+  async function createEntry(kind) {
+    const name = await askText(kind === 'file' ? 'Nama file baru' : 'Nama folder baru', kind === 'file' ? 'mis. index.html' : 'mis. src');
+    if (!name) return;
+    const session = remoteSession();
+    let created;
+    if (session) {
+      const parent = session.dir || session.home;
+      const full = joinRemote(parent, name);
+      created = kind === 'file' ? await api.remoteWriteFile(session.id, full, '') : await api.remoteMkdir(session.id, full);
+    } else {
+      if (!S.local.root) { toast('Buka folder dulu.'); return; }
+      const full = S.local.root.replace(/[\\/]+$/, '') + '/' + name;
+      created = kind === 'file' ? await api.writeFile(full, '') : await api.mkdir(full);
+    }
+    if (!created.ok) { toast(created.error || 'Gagal membuat'); return; }
+    await refreshExplorer();
+    if (kind === 'file') {
+      const session2 = remoteSession();
+      const base = session2 ? (session2.dir || session2.home) : S.local.root;
+      openFile(joinRemote(base, name));
+    }
+  }
+
+  // ---------- Terminal ----------
+  function ensureLocalTerminal() {
+    if (S.terms.local.term) return;
     const term = new Terminal({
       fontSize: 12,
       fontFamily: 'Consolas, ui-monospace, monospace',
@@ -410,25 +564,76 @@
     term.loadAddon(fit);
     term.open($('termLocal'));
     try { fit.fit(); } catch {}
-    term.onData((d) => { if (S.local.termId) api.terminalInput(S.local.termId, d); });
-    S.local.term = term;
-    S.local.fit = fit;
-    startLocalTerminal(S.workspace.root);
+    term.onData((d) => { if (S.terms.local.id) api.terminalInput(S.terms.local.id, d); });
+    S.terms.local.term = term;
+    S.terms.local.fit = fit;
+  }
+
+  function ensureRemoteTerminal() {
+    if (S.terms.remote.term) return S.terms.remote.term;
+    const term = new Terminal({
+      fontSize: 12,
+      fontFamily: 'Consolas, ui-monospace, monospace',
+      cursorBlink: true,
+      theme: { background: '#0b0e13', foreground: '#e6e9ef', cursor: '#3b82f6', selectionBackground: '#264f78' }
+    });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open($('termRemote'));
+    try { fit.fit(); } catch {}
+    term.onData((d) => { if (S.target.type === 'ssh' && S.terms.remote.sessionId) api.remoteInput(S.terms.remote.sessionId, d); });
+    term.onResize(({ cols, rows }) => {
+      if (S.target.type === 'ssh' && S.terms.remote.sessionId) api.remoteResize(S.terms.remote.sessionId, cols, rows);
+    });
+    S.terms.remote.term = term;
+    S.terms.remote.fit = fit;
+    return term;
   }
 
   async function startLocalTerminal(cwd) {
-    if (S.local.termId) return;
+    if (S.terms.local.id) return;
     const res = await api.startTerminal({ cwd: cwd || undefined });
-    if (!res.ok) {
-      S.local.term && S.local.term.writeln('\r\n[gagal memulai terminal] ' + (res.error || ''));
-      return;
+    if (!res.ok) { S.terms.local.term && S.terms.local.term.writeln('\r\n[gagal memulai terminal] ' + (res.error || '')); return; }
+    S.terms.local.id = res.id;
+    S.terms.local.cwd = res.cwd;
+    S.terms.local.term && S.terms.local.term.writeln('SahabatMobile terminal — ' + (res.shell || 'shell'));
+  }
+
+  async function startRemoteTerminal(id) {
+    const term = ensureRemoteTerminal();
+    if (S.terms.remote.sessionId === id) return;
+    S.terms.remote.sessionId = id;
+    term.reset();
+    term.writeln('Membuka shell SSH...');
+    const res = await api.remoteShell(id, term.cols, term.rows);
+    if (!res.ok) term.writeln('\r\n[gagal] ' + (res.error || ''));
+  }
+
+  function showTerminal(mode) {
+    $('termLocal').classList.toggle('hidden', mode !== 'local');
+    $('termRemote').classList.toggle('hidden', mode !== 'remote');
+    $('termBlocked').classList.toggle('hidden', mode !== 'blocked');
+    $('termLabel').textContent = mode === 'local' ? 'lokal' : mode === 'remote' ? 'SSH' : 'FTP';
+    if (mode === 'local') {
+      ensureLocalTerminal();
+      startLocalTerminal(S.local.root);
+      setTimeout(() => { try { S.terms.local.fit && S.terms.local.fit.fit(); } catch {} }, 60);
+    } else if (mode === 'remote') {
+      ensureRemoteTerminal();
+      if (S.target.id) startRemoteTerminal(S.target.id);
+      setTimeout(() => { try { S.terms.remote.fit && S.terms.remote.fit.fit(); } catch {} }, 60);
     }
-    S.local.termId = res.id;
-    S.local.term && S.local.term.writeln('SahabatMobile terminal — ' + (res.shell || 'shell'));
+  }
+
+  function fitAll() {
+    try { S.terms.local.fit && S.terms.local.fit.fit(); } catch {}
+    try { S.terms.remote.fit && S.terms.remote.fit.fit(); } catch {}
   }
 
   // ---------- Agent ----------
   function agentLog(html, cls) {
+    const empty = $('agentLog').querySelector('.agent-empty');
+    if (empty) empty.remove();
     const el = document.createElement('div');
     el.className = 'agent-item ' + (cls || '');
     el.innerHTML = html;
@@ -437,21 +642,35 @@
     return el;
   }
 
+  function agentTargetPayload() {
+    return S.target.type === 'local' ? { type: 'local' } : { type: S.target.type, id: S.target.id };
+  }
+
+  function agentBasePath() {
+    if (S.target.type === 'local') return S.local.root || '(belum dibuka)';
+    const s = remoteSession();
+    return s ? (s.dir || s.home) : '(tidak terhubung)';
+  }
+
   function agentSystemPrompt() {
+    const targetLabel = S.target.type === 'local' ? 'folder lokal' : (S.target.type === 'ssh' ? 'server SSH' : 'server FTP');
     return [
       'Anda adalah agen coding di dalam aplikasi SahabatMobile Desktop.',
-      'Workspace root: ' + (S.workspace.root || '(belum dibuka)'),
+      'Target explorer aktif: ' + targetLabel + '.',
+      'Base path: ' + agentBasePath(),
       'Gunakan tools untuk membaca/menulis file dan menjalankan perintah.',
-      'Selalu pakai path relatif terhadap workspace root. Jangan menulis di luar root.',
+      'Path bisa absolut sesuai base path atau relatif terhadapnya.',
+      S.target.type === 'ftp' ? 'FTP tidak mendukung run_command; gunakan baca/tulis file saja.' : 'Gunakan run_command hanya bila perlu; pengguna akan mengonfirmasi.',
       'Kerjakan tugas langkah demi langkah, lalu jelaskan hasil akhir secara singkat dalam Bahasa Indonesia.'
     ].join('\n');
   }
 
   async function execTool(name, args) {
-    if (name === 'list_dir') return api.agentListDir(args.path || '.');
-    if (name === 'read_file') return api.agentReadFile(args.path);
-    if (name === 'write_file') return api.agentWriteFile(args.path, args.content ?? '');
-    if (name === 'run_command') return api.agentRunCommand(args.command, args.cwd, 120000);
+    const target = agentTargetPayload();
+    if (name === 'list_dir') return api.agentListDir(args.path || (S.target.type === 'local' ? '.' : agentBasePath()), target);
+    if (name === 'read_file') return api.agentReadFile(args.path, target);
+    if (name === 'write_file') return api.agentWriteFile(args.path, args.content ?? '', target);
+    if (name === 'run_command') return api.agentRunCommand(args.command, args.cwd, 120000, target);
     return { ok: false, error: 'Tool tidak dikenal: ' + name };
   }
 
@@ -460,7 +679,8 @@
     const text = input.value.trim();
     if (!text || S.agent.busy) return;
     if (!S.settings.hasKey) { openSettings(); return; }
-    if (!S.workspace.root) { toast('Buka folder kerja dulu.'); return; }
+    if (S.target.type === 'local' && !S.local.root) { toast('Buka folder kerja dulu.'); return; }
+    if (S.target.type !== 'local' && !remoteSession()) { toast('Koneksi remote tidak aktif.'); return; }
     input.value = '';
     S.agent.busy = true;
     $('agentSend').classList.add('hidden');
@@ -496,186 +716,82 @@
         messages.push({ role: 'tool', tool_call_id: call.id, content: output });
         S.agent.messages.push({ role: 'tool', tool_call_id: call.id, content: output });
         agentLog('<details class="agent-result"><summary>' + esc(fn) + ' selesai</summary><pre>' + esc(output.slice(0, 4000)) + '</pre></details>', 'result');
-        if (fn === 'write_file') wrote = true;
+        if (fn === 'write_file' && result && result.ok) wrote = true;
       }
       if (wrote) {
         wrote = false;
-        const info = await api.workspaceTree();
-        if (info.ok) loadWorkspaceTree(info.tree);
+        await refreshExplorer();
       }
     }
     S.agent.busy = false;
     $('agentSend').classList.remove('hidden');
     $('agentStatus').textContent = '';
-    const info = await api.workspaceTree();
-    if (info.ok) loadWorkspaceTree(info.tree);
+    await refreshExplorer();
   }
 
-  // ---------- Remote SSH ----------
-  function ensureRemoteEditor() {
-    if (!S.ssh.editor) {
-      S.ssh.editor = makeEditor('reditor');
-      S.ssh.editor.commands.addCommand({
-        name: 'save',
-        bindKey: { win: 'Ctrl-S', mac: 'Cmd-S' },
-        exec: () => saveActiveRemote()
-      });
-    }
-    if (!S.ssh.term) {
-      const term = new Terminal({
-        fontSize: 12,
-        fontFamily: 'Consolas, ui-monospace, monospace',
-        cursorBlink: true,
-        theme: { background: '#0b0e13', foreground: '#e6e9ef', cursor: '#3b82f6', selectionBackground: '#264f78' }
-      });
-      const fit = new FitAddon.FitAddon();
-      term.loadAddon(fit);
-      term.open($('sshTerm'));
-      try { fit.fit(); } catch {}
-      term.onData((d) => { if (S.ssh.id) api.sshInput(S.ssh.id, d); });
-      S.ssh.term = term;
-      S.ssh.fit = fit;
-    }
-    setTimeout(() => { try { S.ssh.fit && S.ssh.fit.fit(); } catch {} }, 60);
+  // ---------- Chat ----------
+  function chatAdd(role, text) {
+    const empty = $('chat').querySelector('.empty');
+    if (empty) empty.remove();
+    const row = document.createElement('div');
+    row.className = 'message ' + role;
+    row.innerHTML = '<div class="avatar">' + (role === 'user' ? 'You' : role === 'error' ? '!' : 'AI') + '</div><div class="bubble"></div>';
+    row.querySelector('.bubble').textContent = text;
+    $('chat').appendChild(row);
+    $('chat').scrollTop = $('chat').scrollHeight;
+    return row.querySelector('.bubble');
   }
 
-  function renderRemoteList(items, dir) {
-    const box = $('sshTree');
-    box.innerHTML = '';
-    if (dir !== '/') {
-      const up = document.createElement('div');
-      up.className = 'tree-row';
-      up.innerHTML = '<span class="caret">↑</span><span class="fname">..</span>';
-      up.addEventListener('click', () => loadRemoteDir(dir.replace(/\/+[^/]+\/?$/, '') || '/'));
-      box.appendChild(up);
-    }
-    for (const item of items) {
-      const row = document.createElement('div');
-      row.className = 'tree-row';
-      row.innerHTML = '<span class="caret">' + (item.dir ? '▸' : '·') + '</span><span class="fname">' + esc(item.name) + '</span>';
-      row.addEventListener('click', () => {
-        if (item.dir) loadRemoteDir(item.path);
-        else openRemoteFile(item.path);
-      });
-      box.appendChild(row);
-    }
-  }
-
-  async function loadRemoteDir(dir) {
-    if (!S.ssh.id) return;
-    const res = await api.sshListDir(S.ssh.id, dir);
-    if (!res.ok) { toast(res.error || 'Gagal membaca folder remote'); return; }
-    S.ssh.dir = res.dir;
-    $('sshRoot').textContent = res.dir;
-    renderRemoteList(res.items, res.dir);
-  }
-
-  function renderRemoteTabs() {
-    const bar = $('rtabbar');
-    bar.innerHTML = '';
-    for (const tab of S.ssh.tabs) {
-      const el = document.createElement('div');
-      el.className = 'tab' + (tab === S.ssh.active ? ' active' : '');
-      el.innerHTML = '<span class="tab-name">' + esc(tab.name) + (tab.dirty ? ' •' : '') + '</span><span class="tab-close">×</span>';
-      el.addEventListener('click', (e) => {
-        if (e.target.classList.contains('tab-close')) { closeRemoteTab(tab); return; }
-        S.ssh.active = tab;
-        S.ssh.editor.setSession(tab.session);
-        renderRemoteTabs();
-      });
-      bar.appendChild(el);
-    }
-  }
-
-  async function openRemoteFile(filePath) {
-    if (!S.ssh.id) return;
-    const existing = S.ssh.tabs.find((t) => t.path === filePath);
-    if (existing) {
-      S.ssh.active = existing;
-      S.ssh.editor.setSession(existing.session);
-      renderRemoteTabs();
-      return;
-    }
-    const res = await api.sshReadFile(S.ssh.id, filePath);
-    if (!res.ok) { toast(res.error || 'Gagal membuka file remote'); return; }
-    const session = ace.createEditSession(res.content);
-    session.setMode(modeFor(filePath));
-    session.setUseWorker(false);
-    const tab = { path: filePath, name: baseName(filePath), session, dirty: false };
-    session.on('change', () => { if (!tab.dirty) { tab.dirty = true; renderRemoteTabs(); } });
-    S.ssh.tabs.push(tab);
-    S.ssh.active = tab;
-    S.ssh.editor.setSession(session);
-    renderRemoteTabs();
-  }
-
-  function closeRemoteTab(tab) {
-    if (tab.dirty && !confirm('File "' + tab.name + '" belum disimpan. Tutup saja?')) return;
-    const idx = S.ssh.tabs.indexOf(tab);
-    S.ssh.tabs.splice(idx, 1);
-    if (S.ssh.active === tab) {
-      const next = S.ssh.tabs[Math.max(0, idx - 1)];
-      S.ssh.active = next || null;
-      if (next) S.ssh.editor.setSession(next.session);
-      else S.ssh.editor.setSession(ace.createEditSession(''));
-    }
-    renderRemoteTabs();
-  }
-
-  async function saveActiveRemote() {
-    const tab = S.ssh.active;
-    if (!tab || !S.ssh.id) return;
-    const res = await api.sshWriteFile(S.ssh.id, tab.path, S.ssh.editor.getValue());
-    if (!res.ok) { toast(res.error || 'Gagal menyimpan remote'); return; }
-    tab.dirty = false;
-    renderRemoteTabs();
-    toast('Tersimpan: ' + tab.name);
-  }
-
-  async function connectSsh(e) {
-    e.preventDefault();
-    const host = $('sshHost').value.trim();
-    const username = $('sshUser').value.trim();
-    if (!host || !username) return;
-    const btn = $('sshConnect');
-    btn.disabled = true;
-    btn.textContent = 'Menghubungkan...';
-    const res = await api.sshConnect({
-      host,
-      port: Number($('sshPort').value) || 22,
-      username,
-      authType: $('sshAuth').value,
-      password: $('sshPassword').value,
-      privateKey: $('sshKey').value,
-      passphrase: $('sshPassphrase') ? $('sshPassphrase').value : ''
+  async function sendChat() {
+    const input = $('chatInput');
+    const text = input.value.trim();
+    if (!text || S.busy) return;
+    if (!S.settings.hasKey) { openSettings(); return; }
+    input.value = '';
+    S.busy = true;
+    $('sendChat').classList.add('hidden');
+    $('stopChat').classList.remove('hidden');
+    $('chatStatus').textContent = 'Menghubungi model...';
+    S.chat.push({ role: 'user', content: text });
+    chatAdd('user', text);
+    const bubble = chatAdd('assistant', '');
+    const requestId = 'req-' + Date.now();
+    S.requestId = requestId;
+    let full = '';
+    const offChunk = api.onChunk((d) => {
+      if (d.requestId !== requestId) return;
+      full += d.delta || '';
+      bubble.textContent = full;
+      $('chat').scrollTop = $('chat').scrollHeight;
+      $('chatStatus').textContent = 'Mengetik...';
     });
-    btn.disabled = false;
-    btn.textContent = 'Hubungkan';
-    if (!res.ok) { toast('SSH gagal: ' + (res.error || 'unknown')); return; }
-    S.ssh.id = res.id;
-    S.ssh.tabs = [];
-    S.ssh.active = null;
-    $('sshDisconnect').classList.remove('hidden');
-    $('sshRoot').textContent = res.home;
-    ensureRemoteEditor();
-    S.ssh.term.reset();
-    S.ssh.term.writeln('Terhubung ke ' + username + '@' + host + ':' + (Number($('sshPort').value) || 22));
-    const shell = await api.sshShell(res.id, S.ssh.term.cols, S.ssh.term.rows);
-    if (!shell.ok) toast('Shell gagal: ' + (shell.error || ''));
-    loadRemoteDir(res.home);
-    toast('SSH terhubung');
-  }
-
-  async function disconnectSsh() {
-    if (!S.ssh.id) return;
-    await api.sshDisconnect(S.ssh.id);
-    S.ssh.id = null;
-    $('sshDisconnect').classList.add('hidden');
-    $('sshRoot').textContent = 'Belum terhubung';
-    $('sshTree').innerHTML = '';
-    $('rtabbar').innerHTML = '';
-    S.ssh.tabs = [];
-    if (S.ssh.term) S.ssh.term.writeln('\r\n[koneksi diputus]');
+    const offDone = api.onDone((d) => {
+      if (d.requestId !== requestId) return;
+      cleanup();
+      if (d.aborted) $('chatStatus').textContent = 'Dihentikan';
+      else { S.chat.push({ role: 'assistant', content: full }); $('chatStatus').textContent = ''; }
+    });
+    const offErr = api.onError((d) => {
+      if (d.requestId !== requestId) return;
+      cleanup();
+      bubble.parentElement.classList.add('error');
+      bubble.textContent = d.message || 'Terjadi kesalahan.';
+      $('chatStatus').textContent = '';
+    });
+    function cleanup() {
+      offChunk(); offDone(); offErr();
+      S.busy = false;
+      S.requestId = null;
+      $('sendChat').classList.remove('hidden');
+      $('stopChat').classList.add('hidden');
+    }
+    const res = await api.startChat({ requestId, model: currentModel(), messages: S.chat.slice(-20) });
+    if (!res.ok) {
+      cleanup();
+      bubble.parentElement.classList.add('error');
+      bubble.textContent = (res.error && res.error.message) || 'Gagal mengirim.';
+      $('chatStatus').textContent = '';
+    }
   }
 
   // ---------- Models & snippets ----------
@@ -718,8 +834,7 @@
   function renderSnippet() {
     const base = S.settings.baseUrl || 'https://www.sahabatmobile.com/api/v1';
     const model = currentModel();
-    const snippet = buildSnippet(S.snippet || 'curl', base, model);
-    $('snippetCode').textContent = snippet;
+    $('snippetCode').textContent = buildSnippet(S.snippet, base, model);
     $('apiBase').textContent = base;
     $('apiModel').textContent = model;
   }
@@ -778,7 +893,7 @@
     ].join('\n');
   }
 
-  // ---------- Settings ----------
+  // ---------- Settings / modals ----------
   function openSettings() {
     $('apiKeyInput').value = '';
     $('baseUrlInput').value = S.settings.baseUrl || '';
@@ -790,48 +905,125 @@
     const payload = { baseUrl: $('baseUrlInput').value.trim() };
     const key = $('apiKeyInput').value.trim();
     if (key) payload.apiKey = key;
-    const res = await api.saveSettings(payload);
-    S.settings = res;
+    S.settings = await api.saveSettings(payload);
     updateKeyBadge();
     $('settingsModal').classList.add('hidden');
     if (S.settings.hasKey) loadModels();
-    if (S.local.tabs.length === 0) renderSnippet();
   }
 
-  // ---------- Boot ----------
-  function fitAll() {
-    try { S.local.fit && S.local.fit.fit(); } catch {}
-    try { S.ssh.fit && S.ssh.fit.fit(); } catch {}
+  let promptResolve = null;
+  function askText(title, placeholder, okLabel) {
+    $('promptTitle').textContent = title;
+    $('promptInput').value = '';
+    $('promptInput').placeholder = placeholder || '';
+    $('promptOk').textContent = okLabel || 'Buat';
+    $('promptModal').classList.remove('hidden');
+    setTimeout(() => $('promptInput').focus(), 50);
+    return new Promise((resolve) => { promptResolve = resolve; });
   }
 
+  function closePrompt(value) {
+    $('promptModal').classList.add('hidden');
+    if (promptResolve) { promptResolve(value || null); promptResolve = null; }
+  }
+
+  function openClone() {
+    S.cloneDir = null;
+    $('cloneUrl').value = '';
+    $('cloneDir').textContent = 'Belum dipilih';
+    $('cloneModal').classList.remove('hidden');
+    setTimeout(() => $('cloneUrl').focus(), 50);
+  }
+
+  async function pickCloneDir() {
+    const res = await api.pickDirectory();
+    if (!res.ok) return;
+    S.cloneDir = res.path;
+    $('cloneDir').textContent = res.path;
+  }
+
+  async function startClone() {
+    const url = $('cloneUrl').value.trim();
+    if (!url) { toast('Isi URL repository.'); return; }
+    if (!S.cloneDir) { toast('Pilih folder tujuan.'); return; }
+    const btn = $('cloneStart');
+    btn.disabled = true;
+    btn.textContent = 'Meng-clone...';
+    const res = await api.cloneRepo(url, S.cloneDir);
+    btn.disabled = false;
+    btn.textContent = 'Clone';
+    if (!res.ok) { toast('Clone gagal: ' + (res.error || '').slice(0, 300)); return; }
+    S.local.root = res.root;
+    S.local.tree = res.tree;
+    S.local.expanded.clear();
+    S.target = { type: 'local', id: null };
+    renderTargetSelect();
+    $('cloneModal').classList.add('hidden');
+    switchView('workspace');
+    await ensureWorkspace();
+    toast('Repository di-clone: ' + dirName(res.root));
+  }
+
+  // ---------- Bind ----------
   function bind() {
-    document.querySelectorAll('.nav-item').forEach((b) => b.addEventListener('click', () => switchView(b.dataset.view)));
+    document.querySelectorAll('.act[data-view]').forEach((b) => b.addEventListener('click', () => switchView(b.dataset.view)));
+    $('actSettings').addEventListener('click', openSettings);
+    $('openSettings').addEventListener('click', openSettings);
+    $('cancelSettings').addEventListener('click', () => $('settingsModal').classList.add('hidden'));
+    $('saveSettings').addEventListener('click', saveSettings);
+    $('settingsModal').addEventListener('click', (e) => { if (e.target.id === 'settingsModal') $('settingsModal').classList.add('hidden'); });
+
+    $('targetSelect').addEventListener('change', (e) => switchTarget(e.target.value));
+    $('newConnection').addEventListener('click', openConnectionForm);
+    $('closeConnection').addEventListener('click', closeConnectionForm);
+    $('connForm').addEventListener('submit', connectRemote);
+    $('connProtocol').addEventListener('change', () => {
+      const proto = $('connProtocol').value;
+      $('connPort').value = proto === 'sftp' ? '22' : '21';
+      $('connKeyField').classList.toggle('hidden', proto !== 'sftp');
+    });
+    $('disconnectRemote').addEventListener('click', disconnectRemote);
+    $('openFolder').addEventListener('click', openFolder);
+    $('cloneRepo').addEventListener('click', openClone);
+    $('refreshExplorer').addEventListener('click', refreshExplorer);
+    $('newFile').addEventListener('click', () => createEntry('file'));
+    $('newFolder').addEventListener('click', () => createEntry('dir'));
+
+    $('clonePick').addEventListener('click', pickCloneDir);
+    $('cloneCancel').addEventListener('click', () => $('cloneModal').classList.add('hidden'));
+    $('cloneStart').addEventListener('click', startClone);
+
+    $('promptOk').addEventListener('click', () => closePrompt($('promptInput').value.trim()));
+    $('promptCancel').addEventListener('click', () => closePrompt(null));
+    $('promptInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); closePrompt($('promptInput').value.trim()); }
+      if (e.key === 'Escape') closePrompt(null);
+    });
+
     $('sendChat').addEventListener('click', sendChat);
     $('stopChat').addEventListener('click', () => { if (S.requestId) api.abortChat(S.requestId); });
     $('chatInput').addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
     });
     $('modelSelect').addEventListener('change', (e) => setModel(e.target.value));
-    $('openSettings').addEventListener('click', openSettings);
-    $('cancelSettings').addEventListener('click', () => $('settingsModal').classList.add('hidden'));
-    $('saveSettings').addEventListener('click', saveSettings);
-    $('settingsModal').addEventListener('click', (e) => { if (e.target.id === 'settingsModal') $('settingsModal').classList.add('hidden'); });
-
-    $('openFolder').addEventListener('click', openFolder);
     $('refreshModels').addEventListener('click', loadModels);
     $('modelSearch').addEventListener('input', renderModelList);
-
-    $('termToggle').addEventListener('click', () => {
-      const pane = $('localTermPane');
-      pane.classList.toggle('collapsed');
-      $('termToggle').textContent = pane.classList.contains('collapsed') ? '+' : '–';
-      setTimeout(fitAll, 80);
-    });
-    $('termClear').addEventListener('click', () => S.local.term && S.local.term.clear());
 
     $('agentSend').addEventListener('click', sendAgent);
     $('agentInput').addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendAgent(); }
+    });
+
+    $('termToggle').addEventListener('click', () => {
+      const pane = $('termPane');
+      pane.classList.toggle('collapsed');
+      $('termToggle').textContent = pane.classList.contains('collapsed') ? '+' : '–';
+      setTimeout(fitAll, 80);
+    });
+    $('termClear').addEventListener('click', () => {
+      if (!S.terms.local.term) return;
+      S.terms.local.term.clear();
+      if (S.terms.remote.term) S.terms.remote.term.clear();
     });
 
     $('snippetChips').addEventListener('click', (e) => {
@@ -844,33 +1036,33 @@
     $('copyBase').addEventListener('click', async () => { await api.copyText(S.settings.baseUrl); toast('Base URL disalin'); });
     $('copySnippet').addEventListener('click', async () => { await api.copyText($('snippetCode').textContent); toast('Snippet disalin'); });
 
-    $('sshAuth').addEventListener('change', () => {
-      const key = $('sshAuth').value === 'key';
-      $('sshKeyField').classList.toggle('hidden', !key);
-      $('sshPassField').classList.toggle('hidden', key);
-    });
-    $('sshForm').addEventListener('submit', connectSsh);
-    $('sshDisconnect').addEventListener('click', disconnectSsh);
-    $('sshRefresh').addEventListener('click', () => { if (S.ssh.dir) loadRemoteDir(S.ssh.dir); });
-    $('sshTermToggle').addEventListener('click', () => {
-      const pane = $('sshTermPane');
-      pane.classList.toggle('collapsed');
-      $('sshTermToggle').textContent = pane.classList.contains('collapsed') ? '+' : '–';
-      setTimeout(fitAll, 80);
-    });
-    $('sshTermClear').addEventListener('click', () => S.ssh.term && S.ssh.term.clear());
-
     window.addEventListener('resize', fitAll);
-    window.addEventListener('beforeunload', () => {
-      if (S.ssh.id) api.sshDisconnect(S.ssh.id);
-    });
     document.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
-        if (S.view === 'remote') saveActiveRemote();
-        else if (S.view === 'workspace') saveActiveLocal();
+        if (S.view === 'workspace') saveActive();
+      }
+      if (e.key === 'Escape') {
+        if (!$('promptModal').classList.contains('hidden')) closePrompt(null);
+        if (!$('cloneModal').classList.contains('hidden')) $('cloneModal').classList.add('hidden');
+        if (!$('settingsModal').classList.contains('hidden')) $('settingsModal').classList.add('hidden');
       }
     });
+  }
+
+  async function openFolder() {
+    const res = await api.openFolder();
+    if (!res.ok) return;
+    S.local.root = res.root;
+    S.local.tree = res.tree;
+    S.local.expanded.clear();
+    S.target = { type: 'local', id: null };
+    renderTargetSelect();
+    if (S.terms.local.id) await api.stopTerminal(S.terms.local.id);
+    S.terms.local.id = null;
+    S.terms.local.term && S.terms.local.term.reset();
+    await ensureWorkspace();
+    toast('Folder dibuka: ' + dirName(res.root));
   }
 
   async function init() {
@@ -879,32 +1071,41 @@
     S.settings = await api.getSettings();
     updateKeyBadge();
     renderModelOptions();
+    renderTargetSelect();
+    renderSnippet();
 
     api.onTermData((d) => {
-      if (S.local.term && d.id === S.local.termId) S.local.term.write(d.data);
+      if (S.terms.local.term && d.id === S.terms.local.id) S.terms.local.term.write(d.data);
     });
     api.onTermExit((d) => {
-      if (d.id === S.local.termId) {
-        S.local.termId = null;
-        if (S.local.term) S.local.term.writeln('\r\n[terminal berhenti, kode ' + d.code + ']');
+      if (d.id === S.terms.local.id) {
+        S.terms.local.id = null;
+        if (S.terms.local.term) S.terms.local.term.writeln('\r\n[terminal berhenti, kode ' + d.code + ']');
       }
     });
-    api.onSshData((d) => {
-      if (S.ssh.term && d.id === S.ssh.id) S.ssh.term.write(d.data);
+    api.onRemoteData((d) => {
+      if (S.terms.remote.term && d.id === S.terms.remote.sessionId) S.terms.remote.term.write(d.data);
     });
-    api.onSshExit((d) => {
-      if (d.id === S.ssh.id && S.ssh.term) S.ssh.term.writeln('\r\n[shell SSH selesai]');
+    api.onRemoteExit((d) => {
+      if (S.terms.remote.term && d.id === S.terms.remote.sessionId) S.terms.remote.term.writeln('\r\n[shell SSH selesai]');
     });
-    api.onSshClosed((d) => {
-      if (d.id === S.ssh.id) {
-        S.ssh.id = null;
-        $('sshDisconnect').classList.add('hidden');
-        $('sshRoot').textContent = 'Koneksi terputus';
-        if (S.ssh.term) S.ssh.term.writeln('\r\n[koneksi SSH terputus]');
+    api.onRemoteClosed((d) => {
+      S.connections = S.connections.filter((c) => c.id !== d.id);
+      S.remotes.delete(d.id);
+      S.tabs = S.tabs.filter((t) => t.target.id !== d.id);
+      if (S.active && S.active.target.id === d.id) {
+        S.active = S.tabs[S.tabs.length - 1] || null;
+        setActiveSession(S.active);
+        renderTabs();
       }
+      if (S.target.id === d.id) {
+        S.target = { type: 'local', id: null };
+        renderTargetSelect();
+        ensureWorkspace();
+      }
+      toast('Koneksi remote terputus');
     });
 
-    renderSnippet();
     if (S.settings.hasKey) loadModels();
     else setTimeout(openSettings, 400);
   }

@@ -4,18 +4,20 @@ const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
 const { Client: SshClient } = require('ssh2');
+const { Client: FtpClient } = require('basic-ftp');
 
 const DEFAULT_BASE_URL = 'https://www.sahabatmobile.com/api/v1';
 const IGNORED_DIRS = new Set(['node_modules', '.git', 'dist', 'out', '.next', '.cache', '__pycache__']);
 const MAX_READ = 5 * 1024 * 1024;
+const posix = path.posix;
 
 const controllers = new Map();
 const terminals = new Map();
-const sshSessions = new Map();
+const remotes = new Map();
 let storedKey = null;
 let workspaceRoot = null;
 let termSeq = 0;
-let sshSeq = 0;
+let remoteSeq = 0;
 let allowAgentCommands = false;
 
 function settingsFile() {
@@ -103,10 +105,10 @@ function errorMessage(status, text) {
 
 function createWindow() {
   const win = new BrowserWindow({
-    width: 1320,
-    height: 820,
-    minWidth: 960,
-    minHeight: 620,
+    width: 1380,
+    height: 860,
+    minWidth: 1020,
+    minHeight: 640,
     backgroundColor: '#0f1115',
     title: 'SahabatMobile Desktop',
     webPreferences: {
@@ -131,19 +133,12 @@ function createWindow() {
             const out = {};
             out.ace = typeof window.ace;
             out.term = typeof window.Terminal;
-            out.addon = typeof window.FitAddon;
             document.querySelector('[data-view="workspace"]').click();
-            await new Promise(r => setTimeout(r, 700));
+            await new Promise(r => setTimeout(r, 800));
             out.aceContent = !!document.querySelector('#editor .ace_content');
-            out.xterm = !!document.querySelector('#termLocal .xterm');
-            document.querySelector('[data-view="remote"]').click();
-            await new Promise(r => setTimeout(r, 700));
-            out.reditor = !!document.querySelector('#reditor .ace_content');
-            out.sshTerm = !!document.querySelector('#sshTerm .xterm');
-            document.querySelector('[data-view="models"]').click();
-            document.querySelector('[data-view="api"]').click();
-            await new Promise(r => setTimeout(r, 300));
-            out.snippet = (document.getElementById('snippetCode').textContent || '').slice(0, 20);
+            out.agentPanel = !!document.querySelector('#agentLog');
+            out.activity = document.querySelectorAll('.act').length;
+            out.sidepanel = !!document.querySelector('#explorerPane');
             return out;
           })()`);
           console.log('SMOKE_RESULT ' + JSON.stringify(result));
@@ -242,6 +237,140 @@ function rmTree(dir) {
   } catch {}
 }
 
+// ---------- remote (SSH/SFTP + FTP) ----------
+
+function getRemote(id) {
+  const session = remotes.get(id);
+  if (!session) throw new Error('Koneksi remote tidak ditemukan.');
+  return session;
+}
+
+async function remoteList(session, dir) {
+  const target = dir || session.home || '.';
+  if (session.type === 'ssh') {
+    const entries = await new Promise((resolve, reject) => {
+      session.sftp.readdir(target, (err, list) => (err ? reject(err) : resolve(list)));
+    });
+    return entries
+      .filter((e) => !IGNORED_DIRS.has(e.filename) && e.filename !== '.' && e.filename !== '..')
+      .sort((a, b) => Number(b.attrs.isDirectory()) - Number(a.attrs.isDirectory()) || a.filename.localeCompare(b.filename))
+      .slice(0, 800)
+      .map((e) => ({ name: e.filename, path: posix.join(target, e.filename), dir: e.attrs.isDirectory() }));
+  }
+  const entries = await session.client.list(target);
+  return entries
+    .filter((e) => !IGNORED_DIRS.has(e.name) && e.name !== '.' && e.name !== '..')
+    .sort((a, b) => Number(b.isDirectory) - Number(a.isDirectory) || a.name.localeCompare(b.name))
+    .slice(0, 800)
+    .map((e) => ({ name: e.name, path: posix.join(target, e.name), dir: e.isDirectory }));
+}
+
+async function remoteRead(session, filePath) {
+  if (session.type === 'ssh') {
+    const buf = await new Promise((resolve, reject) => {
+      session.sftp.readFile(filePath, (err, data) => (err ? reject(err) : resolve(data)));
+    });
+    return assertTextBuffer(buf, 'File remote');
+  }
+  const tmp = path.join(os.tmpdir(), 'sahabat-dl-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+  try {
+    await session.client.downloadTo(tmp, filePath);
+    const buf = await fs.promises.readFile(tmp);
+    return assertTextBuffer(buf, 'File remote');
+  } finally {
+    try { await fs.promises.unlink(tmp); } catch {}
+  }
+}
+
+async function remoteWrite(session, filePath, content) {
+  if (session.type === 'ssh') {
+    await new Promise((resolve, reject) => {
+      session.sftp.writeFile(filePath, String(content ?? ''), 'utf8', (err) => (err ? reject(err) : resolve()));
+    });
+    return;
+  }
+  const tmp = path.join(os.tmpdir(), 'sahabat-ul-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+  const prev = await session.client.pwd();
+  try {
+    await fs.promises.writeFile(tmp, String(content ?? ''), 'utf8');
+    const parent = posix.dirname(filePath);
+    if (parent && parent !== '.' && parent !== '/') {
+      try { await session.client.ensureDir(parent); } catch {}
+    }
+    await session.client.uploadFrom(tmp, filePath);
+  } finally {
+    try { await session.client.cd(prev); } catch {}
+    try { await fs.promises.unlink(tmp); } catch {}
+  }
+}
+
+async function remoteMkdir(session, dirPath) {
+  if (session.type === 'ssh') {
+    await new Promise((resolve, reject) => session.sftp.mkdir(dirPath, (err) => (err ? reject(err) : resolve())));
+    return;
+  }
+  const prev = await session.client.pwd();
+  try {
+    await session.client.ensureDir(dirPath);
+  } finally {
+    try { await session.client.cd(prev); } catch {}
+  }
+}
+
+async function remoteRemove(session, filePath, isDir) {
+  if (session.type === 'ssh') {
+    await new Promise((resolve, reject) => {
+      const cb = (err) => (err ? reject(err) : resolve());
+      if (isDir) session.sftp.rmdir(filePath, cb);
+      else session.sftp.unlink(filePath, cb);
+    });
+    return;
+  }
+  if (isDir) await session.client.removeDir(filePath);
+  else await session.client.remove(filePath);
+}
+
+function remoteCommand(session, command, cwd, timeoutMs) {
+  if (session.type !== 'ssh') {
+    return Promise.resolve({ code: -1, output: 'FTP tidak mendukung eksekusi perintah. Gunakan terminal lokal atau koneksi SSH.' });
+  }
+  return new Promise((resolve) => {
+    const full = cwd ? "cd '" + String(cwd).replace(/'/g, "'\\''") + "' && " + command : command;
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve({ code: -1, output: '[timeout] perintah remote dihentikan.' });
+      }
+    }, timeoutMs || 120000);
+    session.client.exec(full, (err, stream) => {
+      if (err) {
+        clearTimeout(timer);
+        resolve({ code: -1, output: err.message });
+        return;
+      }
+      let stdout = '';
+      let stderr = '';
+      stream.on('data', (d) => { stdout += d.toString('utf8'); });
+      stream.stderr.on('data', (d) => { stderr += d.toString('utf8'); });
+      stream.on('close', (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ code, output: (stdout + (stderr ? '\n[stderr]\n' + stderr : '')).slice(0, 100000) || '(tanpa output)' });
+      });
+    });
+  });
+}
+
+function resolveAgentTarget(target) {
+  if (target && target.id) {
+    const session = getRemote(target.id);
+    return { kind: 'remote', session, type: session.type };
+  }
+  return { kind: 'local' };
+}
+
 app.whenReady().then(() => {
   storedKey = loadKey();
   createWindow();
@@ -256,7 +385,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   for (const child of terminals.values()) { try { child.kill(); } catch {} }
-  for (const s of sshSessions.values()) { try { s.client.end(); } catch {} }
+  for (const s of remotes.values()) { try { s.client.end ? s.client.end() : s.client.close(); } catch {} }
 });
 
 ipcMain.handle('settings:get', () => ({
@@ -439,8 +568,42 @@ ipcMain.handle('dialog:openFolder', async (event) => {
   const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
   if (result.canceled || !result.filePaths.length) return { ok: false };
   workspaceRoot = result.filePaths[0];
-  const tree = await buildTree(workspaceRoot, 0);
-  return { ok: true, root: workspaceRoot, tree };
+  return { ok: true, root: workspaceRoot, tree: await buildTree(workspaceRoot, 0) };
+});
+
+ipcMain.handle('dialog:pickDirectory', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const result = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] });
+  if (result.canceled || !result.filePaths.length) return { ok: false };
+  return { ok: true, path: result.filePaths[0] };
+});
+
+ipcMain.handle('repo:clone', async (event, payload) => {
+  const url = String(payload.url || '').trim();
+  const parent = String(payload.dir || '').trim();
+  if (!/^(https?:\/\/|git@|ssh:\/\/)/.test(url)) return { ok: false, error: 'URL repository tidak valid.' };
+  if (!parent) return { ok: false, error: 'Folder tujuan belum dipilih.' };
+  let name = url.replace(/\.git$/, '').split(/[\\/]/).pop() || 'repo';
+  if (name.includes(':')) name = name.split(':').pop();
+  const target = path.join(parent, name);
+  if (fs.existsSync(target)) return { ok: false, error: 'Folder tujuan sudah ada: ' + target };
+  const result = await new Promise((resolve) => {
+    let log = '';
+    let child;
+    try {
+      child = spawn('git', ['clone', '--depth', '1', url, target], { cwd: parent, env: process.env, windowsHide: true });
+    } catch (err) {
+      resolve({ code: -1, log: err.message });
+      return;
+    }
+    child.stdout.on('data', (d) => { log += d.toString('utf8'); });
+    child.stderr.on('data', (d) => { log += d.toString('utf8'); });
+    child.on('error', (err) => resolve({ code: -1, log: log + err.message }));
+    child.on('close', (code) => resolve({ code, log }));
+  });
+  if (result.code !== 0) return { ok: false, error: result.log.slice(-2000) || 'git clone gagal.' };
+  workspaceRoot = target;
+  return { ok: true, root: target, tree: await buildTree(target, 0), log: result.log };
 });
 
 ipcMain.handle('workspace:info', async () => {
@@ -468,6 +631,16 @@ ipcMain.handle('fs:write', async (event, payload) => {
     const abs = resolveInRoot(payload.path);
     await fs.promises.mkdir(path.dirname(abs), { recursive: true });
     await fs.promises.writeFile(abs, String(payload.content ?? ''), 'utf8');
+    return { ok: true, path: abs };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('fs:mkdir', async (event, dirPath) => {
+  try {
+    const abs = resolveInRoot(dirPath);
+    await fs.promises.mkdir(abs, { recursive: true });
     return { ok: true, path: abs };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -520,81 +693,42 @@ ipcMain.handle('term:stop', (event, id) => {
   return { ok: true };
 });
 
-ipcMain.handle('agent:listDir', async (event, dir) => {
-  try {
-    const abs = resolveInRoot(dir || '.');
-    const entries = await fs.promises.readdir(abs, { withFileTypes: true });
-    const items = entries
-      .filter((e) => !IGNORED_DIRS.has(e.name))
-      .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
-      .slice(0, 500)
-      .map((e) => ({ name: e.name, type: e.isDirectory() ? 'dir' : 'file' }));
-    return { ok: true, path: abs, items };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
+ipcMain.handle('remote:connect', async (event, cfg) => {
+  const id = 'r' + (++remoteSeq);
+  const host = String(cfg.host || '').trim();
+  const username = String(cfg.username || '').trim();
+  if (!host || !username) return { ok: false, error: 'Host dan username wajib diisi.' };
+  const protocol = cfg.protocol || 'sftp';
 
-ipcMain.handle('agent:readFile', async (event, filePath) => {
-  try {
-    const abs = resolveInRoot(filePath);
-    const buf = await fs.promises.readFile(abs);
-    const content = assertTextBuffer(buf, 'File');
-    return { ok: true, path: abs, content: content.length > 120000 ? content.slice(0, 120000) + '\n...[dipotong]' : content };
-  } catch (err) {
-    return { ok: false, error: err.message };
+  if (protocol === 'ftp' || protocol === 'ftps') {
+    const client = new FtpClient();
+    client.ftp.verbose = false;
+    try {
+      await client.access({
+        host,
+        port: Number(cfg.port) || 21,
+        user: username,
+        password: String(cfg.password || ''),
+        secure: protocol === 'ftps',
+        secureOptions: protocol === 'ftps' ? { rejectUnauthorized: false } : undefined
+      });
+      const home = await client.pwd();
+      remotes.set(id, { type: 'ftp', client, home, shell: null });
+      return { ok: true, id, home, type: 'ftp', label: 'FTP ' + username + '@' + host };
+    } catch (err) {
+      try { client.close(); } catch {}
+      return { ok: false, error: err.message };
+    }
   }
-});
 
-ipcMain.handle('agent:writeFile', async (event, payload) => {
-  try {
-    const abs = resolveInRoot(payload.path);
-    await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-    await fs.promises.writeFile(abs, String(payload.content ?? ''), 'utf8');
-    return { ok: true, path: abs };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('agent:runCommand', async (event, payload) => {
-  if (!workspaceRoot) return { ok: false, error: 'Folder kerja belum dibuka.' };
-  const win = BrowserWindow.fromWebContents(event.sender);
-  if (!allowAgentCommands) {
-    const answer = await dialog.showMessageBox(win, {
-      type: 'warning',
-      buttons: ['Jalankan', 'Batal'],
-      defaultId: 1,
-      cancelId: 1,
-      title: 'Agen menjalankan perintah',
-      message: 'Agen ingin menjalankan perintah berikut:',
-      detail: String(payload.command || '').slice(0, 2000),
-      checkboxLabel: 'Izinkan agen menjalankan perintah selama sesi ini',
-      checkboxChecked: false
-    });
-    if (answer.response !== 0) return { ok: true, denied: true, output: 'Pengguna menolak eksekusi perintah.' };
-    if (answer.checkboxChecked) allowAgentCommands = true;
-  }
-  const cwd = payload.cwd ? resolveInRoot(payload.cwd) : workspaceRoot;
-  const result = await runShellCommand(String(payload.command || ''), cwd, payload.timeoutMs);
-  return {
-    ok: true,
-    code: result.code,
-    output: (result.stdout + (result.stderr ? '\n[stderr]\n' + result.stderr : '')).slice(0, 60000) || '(tanpa output)'
-  };
-});
-
-ipcMain.handle('ssh:connect', async (event, cfg) => {
-  const id = 's' + (++sshSeq);
   const client = new SshClient();
   const options = {
-    host: String(cfg.host || '').trim(),
+    host,
     port: Number(cfg.port) || 22,
-    username: String(cfg.username || '').trim(),
+    username,
     readyTimeout: 25000,
     keepaliveInterval: 15000
   };
-  if (!options.host || !options.username) return { ok: false, error: 'Host dan username wajib diisi.' };
   if (cfg.authType === 'key' && cfg.privateKey) {
     try {
       options.privateKey = fs.readFileSync(String(cfg.privateKey).trim());
@@ -613,31 +747,78 @@ ipcMain.handle('ssh:connect', async (event, cfg) => {
     });
     const sftp = await new Promise((resolve, reject) => client.sftp((err, s) => (err ? reject(err) : resolve(s))));
     const home = await new Promise((resolve) => sftp.realpath('.', (err, p) => resolve(err ? '.' : p)));
-    sshSessions.set(id, { client, sftp, shell: null, home });
+    remotes.set(id, { type: 'ssh', client, sftp, home, shell: null });
     client.on('close', () => {
-      const s = sshSessions.get(id);
-      if (s) sshSessions.delete(id);
-      send('ssh:closed', { id });
+      remotes.delete(id);
+      send('remote:closed', { id });
     });
-    return { ok: true, id, home };
+    return { ok: true, id, home, type: 'ssh', label: 'SSH ' + username + '@' + host };
   } catch (err) {
     try { client.end(); } catch {}
     return { ok: false, error: err.message };
   }
 });
 
-ipcMain.handle('ssh:shell', async (event, payload) => {
-  const s = sshSessions.get(payload.id);
-  if (!s) return { ok: false, error: 'Sesi SSH tidak ditemukan.' };
-  if (s.shell) return { ok: true };
+ipcMain.handle('remote:listDir', async (event, payload) => {
   try {
+    const session = getRemote(payload.id);
+    return { ok: true, dir: payload.dir || session.home, items: await remoteList(session, payload.dir) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('remote:readFile', async (event, payload) => {
+  try {
+    const session = getRemote(payload.id);
+    return { ok: true, content: await remoteRead(session, payload.path) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('remote:writeFile', async (event, payload) => {
+  try {
+    const session = getRemote(payload.id);
+    await remoteWrite(session, payload.path, payload.content);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('remote:mkdir', async (event, payload) => {
+  try {
+    const session = getRemote(payload.id);
+    await remoteMkdir(session, payload.path);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('remote:remove', async (event, payload) => {
+  try {
+    const session = getRemote(payload.id);
+    await remoteRemove(session, payload.path, Boolean(payload.dir));
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('remote:shell', async (event, payload) => {
+  try {
+    const s = getRemote(payload.id);
+    if (s.type !== 'ssh') return { ok: false, error: 'FTP tidak mendukung terminal.' };
+    if (s.shell) return { ok: true };
     const stream = await new Promise((resolve, reject) => {
       s.client.shell({ term: 'xterm-256color', cols: payload.cols || 120, rows: payload.rows || 30 }, (err, st) => (err ? reject(err) : resolve(st)));
     });
     stream.setEncoding('utf8');
-    stream.on('data', (d) => send('ssh:data', { id: payload.id, data: d }));
-    stream.stderr.on('data', (d) => send('ssh:data', { id: payload.id, data: d }));
-    stream.on('close', () => send('ssh:exit', { id: payload.id }));
+    stream.on('data', (d) => send('remote:data', { id: payload.id, data: d }));
+    stream.stderr.on('data', (d) => send('remote:data', { id: payload.id, data: d }));
+    stream.on('close', () => send('remote:exit', { id: payload.id }));
     s.shell = stream;
     return { ok: true };
   } catch (err) {
@@ -645,73 +826,110 @@ ipcMain.handle('ssh:shell', async (event, payload) => {
   }
 });
 
-ipcMain.handle('ssh:input', (event, payload) => {
-  const s = sshSessions.get(payload.id);
+ipcMain.handle('remote:input', (event, payload) => {
+  const s = remotes.get(payload.id);
   if (s && s.shell) s.shell.write(String(payload.data || ''));
   return { ok: Boolean(s && s.shell) };
 });
 
-ipcMain.handle('ssh:resize', (event, payload) => {
-  const s = sshSessions.get(payload.id);
+ipcMain.handle('remote:resize', (event, payload) => {
+  const s = remotes.get(payload.id);
   if (s && s.shell) s.shell.setWindow(payload.rows || 30, payload.cols || 120, 0, 0);
   return { ok: Boolean(s && s.shell) };
 });
 
-ipcMain.handle('ssh:listDir', async (event, payload) => {
-  const s = sshSessions.get(payload.id);
-  if (!s) return { ok: false, error: 'Sesi SSH tidak ditemukan.' };
-  try {
-    const entries = await new Promise((resolve, reject) => {
-      s.sftp.readdir(payload.dir, (err, list) => (err ? reject(err) : resolve(list)));
-    });
-    const items = entries
-      .filter((e) => !IGNORED_DIRS.has(e.filename) && e.filename !== '.' && e.filename !== '..')
-      .sort((a, b) => Number(b.attrs.isDirectory()) - Number(a.attrs.isDirectory()) || a.filename.localeCompare(b.filename))
-      .slice(0, 600)
-      .map((e) => ({
-        name: e.filename,
-        path: payload.dir.replace(/\/+$/, '') + '/' + e.filename,
-        dir: e.attrs.isDirectory(),
-        children: []
-      }));
-    return { ok: true, dir: payload.dir, items };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('ssh:readFile', async (event, payload) => {
-  const s = sshSessions.get(payload.id);
-  if (!s) return { ok: false, error: 'Sesi SSH tidak ditemukan.' };
-  try {
-    const buf = await new Promise((resolve, reject) => {
-      s.sftp.readFile(payload.path, (err, data) => (err ? reject(err) : resolve(data)));
-    });
-    return { ok: true, content: assertTextBuffer(buf, 'File remote') };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('ssh:writeFile', async (event, payload) => {
-  const s = sshSessions.get(payload.id);
-  if (!s) return { ok: false, error: 'Sesi SSH tidak ditemukan.' };
-  try {
-    await new Promise((resolve, reject) => {
-      s.sftp.writeFile(payload.path, String(payload.content ?? ''), 'utf8', (err) => (err ? reject(err) : resolve()));
-    });
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('ssh:disconnect', (event, id) => {
-  const s = sshSessions.get(id);
+ipcMain.handle('remote:disconnect', (event, id) => {
+  const s = remotes.get(id);
   if (s) {
     try { if (s.shell) s.shell.end(); } catch {}
-    try { s.client.end(); } catch {}
-    sshSessions.delete(id);
+    try { if (s.type === 'ssh') s.client.end(); else s.client.close(); } catch {}
+    remotes.delete(id);
   }
   return { ok: true };
+});
+
+ipcMain.handle('agent:listDir', async (event, payload) => {
+  try {
+    const ctx = resolveAgentTarget(payload.target);
+    if (ctx.kind === 'remote') {
+      const items = await remoteList(ctx.session, payload.dir);
+      return { ok: true, path: payload.dir || ctx.session.home, items: items.map((i) => ({ name: i.name, type: i.dir ? 'dir' : 'file' })) };
+    }
+    const abs = resolveInRoot(payload.dir || '.');
+    const entries = await fs.promises.readdir(abs, { withFileTypes: true });
+    const items = entries
+      .filter((e) => !IGNORED_DIRS.has(e.name))
+      .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
+      .slice(0, 500)
+      .map((e) => ({ name: e.name, type: e.isDirectory() ? 'dir' : 'file' }));
+    return { ok: true, path: abs, items };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('agent:readFile', async (event, payload) => {
+  try {
+    const ctx = resolveAgentTarget(payload.target);
+    if (ctx.kind === 'remote') {
+      const content = await remoteRead(ctx.session, payload.path);
+      return { ok: true, content: content.length > 120000 ? content.slice(0, 120000) + '\n...[dipotong]' : content };
+    }
+    const abs = resolveInRoot(payload.path);
+    const buf = await fs.promises.readFile(abs);
+    const content = assertTextBuffer(buf, 'File');
+    return { ok: true, path: abs, content: content.length > 120000 ? content.slice(0, 120000) + '\n...[dipotong]' : content };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('agent:writeFile', async (event, payload) => {
+  try {
+    const ctx = resolveAgentTarget(payload.target);
+    if (ctx.kind === 'remote') {
+      await remoteWrite(ctx.session, payload.path, payload.content);
+      return { ok: true };
+    }
+    const abs = resolveInRoot(payload.path);
+    await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+    await fs.promises.writeFile(abs, String(payload.content ?? ''), 'utf8');
+    return { ok: true, path: abs };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('agent:runCommand', async (event, payload) => {
+  const ctx = resolveAgentTarget(payload.target);
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const where = ctx.kind === 'remote' ? (ctx.type === 'ssh' ? 'server SSH' : 'server FTP (tidak didukung)') : 'folder lokal';
+  if (!allowAgentCommands) {
+    const answer = await dialog.showMessageBox(win, {
+      type: 'warning',
+      buttons: ['Jalankan', 'Batal'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Agen menjalankan perintah',
+      message: 'Agen ingin menjalankan perintah di ' + where + ':',
+      detail: String(payload.command || '').slice(0, 2000),
+      checkboxLabel: 'Izinkan agen menjalankan perintah selama sesi ini',
+      checkboxChecked: false
+    });
+    if (answer.response !== 0) return { ok: true, denied: true, output: 'Pengguna menolak eksekusi perintah.' };
+    if (answer.checkboxChecked) allowAgentCommands = true;
+  }
+  if (ctx.kind === 'remote') {
+    if (ctx.type !== 'ssh') return { ok: false, error: 'FTP tidak mendukung eksekusi perintah.' };
+    const result = await remoteCommand(ctx.session, String(payload.command || ''), payload.cwd, payload.timeoutMs);
+    return { ok: true, code: result.code, output: result.output };
+  }
+  if (!workspaceRoot) return { ok: false, error: 'Folder kerja belum dibuka.' };
+  const cwd = payload.cwd ? resolveInRoot(payload.cwd) : workspaceRoot;
+  const result = await runShellCommand(String(payload.command || ''), cwd, payload.timeoutMs);
+  return {
+    ok: true,
+    code: result.code,
+    output: (result.stdout + (result.stderr ? '\n[stderr]\n' + result.stderr : '')).slice(0, 60000) || '(tanpa output)'
+  };
 });
