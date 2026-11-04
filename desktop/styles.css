@@ -1,0 +1,263 @@
+:root {
+  --bg: #0f1115;
+  --panel: #161a21;
+  --panel-2: #1d232c;
+  --text: #e6e9ef;
+  --muted: #8a93a3;
+  --accent: #3b82f6;
+  --accent-2: #2563eb;
+  --danger: #ef4444;
+  --border: #262d38;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+select,
+input,
+textarea {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+  outline: none;
+}
+
+select:focus,
+input:focus,
+textarea:focus {
+  border-color: var(--accent);
+}
+
+select {
+  max-width: 280px;
+}
+
+button {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+button.primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+button.primary:hover {
+  background: var(--accent-2);
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--text);
+  border-color: var(--border);
+}
+
+button.ghost:hover {
+  background: var(--panel-2);
+}
+
+button.danger {
+  background: var(--danger);
+  color: #fff;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.chat {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 16px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.empty {
+  margin: auto;
+  text-align: center;
+  color: var(--muted);
+  max-width: 380px;
+}
+
+.empty h2 {
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.message {
+  display: flex;
+  gap: 10px;
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.message .avatar {
+  flex: 0 0 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--panel-2);
+  color: var(--muted);
+}
+
+.message.user .avatar {
+  background: var(--accent);
+  color: #fff;
+}
+
+.message .bubble {
+  flex: 1;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+.message.user .bubble {
+  background: var(--panel-2);
+}
+
+.message.error .bubble {
+  border-color: var(--danger);
+  color: #fecaca;
+}
+
+.composer {
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.composer textarea {
+  resize: none;
+  width: 100%;
+  max-height: 220px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.status {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+
+.modal-card {
+  width: 100%;
+  max-width: 460px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.modal-card h3 {
+  margin: 0 0 4px;
+}
+
+.modal-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.modal-card input {
+  color: var(--text);
+}
+
+.hint {
+  margin: -4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
