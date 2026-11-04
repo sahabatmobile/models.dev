@@ -7,37 +7,137 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <span class="dot"></span>
-      <span>SahabatMobile AI</span>
-    </div>
-    <div class="controls">
-      <select id="modelSelect" title="Pilih model"></select>
-      <button id="refreshModels" class="ghost" title="Muat ulang daftar model">Muat Model</button>
-      <button id="openSettings" class="ghost">Pengaturan</button>
-    </div>
-  </header>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="dot"></span>
+        <span>SahabatMobile</span>
+      </div>
+      <nav class="nav">
+        <button class="nav-item active" data-tab="chat">Chat</button>
+        <button class="nav-item" data-tab="trae">Integrasi Trae</button>
+        <button class="nav-item" data-tab="api">API &amp; Snippet</button>
+        <button class="nav-item" data-tab="models">Model</button>
+      </nav>
+      <div class="modes">
+        <div class="mode active"><span>Developer</span><em>aktif</em></div>
+        <div class="mode soon"><span>UMKM</span><em>segera</em></div>
+        <div class="mode soon"><span>3D Creator</span><em>segera</em></div>
+      </div>
+      <button id="openSettings" class="ghost block">Pengaturan API Key</button>
+    </aside>
 
-  <main id="chat" class="chat">
-    <div class="empty" id="emptyState">
-      <h2>Mulai percakapan</h2>
-      <p>Isi API key lewat menu Pengaturan, lalu pilih model dan kirim pesan.</p>
-    </div>
-  </main>
+    <div class="main">
+      <header class="topbar">
+        <div class="title" id="tabTitle">Chat</div>
+        <div class="controls">
+          <span id="keyBadge" class="badge off">Key belum diisi</span>
+          <select id="modelSelect" title="Pilih model"></select>
+          <button id="refreshModels" class="ghost">Muat Model</button>
+        </div>
+      </header>
 
-  <footer class="composer">
-    <textarea id="input" rows="2" placeholder="Tulis pesan... (Enter kirim, Shift+Enter baris baru)"></textarea>
-    <div class="actions">
-      <span id="status" class="status"></span>
-      <button id="send" class="primary">Kirim</button>
-      <button id="stop" class="danger hidden">Stop</button>
+      <section id="view-chat" class="view">
+        <main id="chat" class="chat">
+          <div class="empty" id="emptyState">
+            <h2>Mulai percakapan</h2>
+            <p>Isi API key lewat Pengaturan, pilih model, lalu kirim pesan.</p>
+          </div>
+        </main>
+        <footer class="composer">
+          <textarea id="input" rows="2" placeholder="Tulis pesan... (Enter kirim, Shift+Enter baris baru)"></textarea>
+          <div class="actions">
+            <span id="status" class="status"></span>
+            <button id="send" class="primary">Kirim</button>
+            <button id="stop" class="danger hidden">Stop</button>
+          </div>
+        </footer>
+      </section>
+
+      <section id="view-trae" class="view hidden">
+        <div class="panel">
+          <h2>Integrasi TRAE (trae.ai)</h2>
+          <p class="muted">Hubungkan AI Gateway SahabatMobile ke Trae lewat menu Custom Model.</p>
+          <ol class="steps">
+            <li>Buka Trae → <b>Settings</b> → <b>Models</b> → <b>Add Model</b>.</li>
+            <li>Pilih <b>Custom Model</b> (bukan provider preset).</li>
+            <li>Isi field di bawah ini persis, lalu klik <b>Add Model</b>.</li>
+            <li>Pilih model SahabatMobile di pemilih model Trae, lalu mulai chat.</li>
+          </ol>
+
+          <div class="field-row">
+            <div class="field grow">
+              <label>API Format</label>
+              <div class="value">OpenAI Chat Completions</div>
+            </div>
+            <div class="field">
+              <label>Full URL</label>
+              <div class="value">Off</div>
+            </div>
+          </div>
+
+          <div class="field-row">
+            <div class="field grow">
+              <label>Custom Request URL</label>
+              <div class="value" id="traeBaseUrl">https://www.sahabatmobile.com/api/v1</div>
+            </div>
+            <button class="ghost" data-copy="traeBaseUrl">Salin</button>
+          </div>
+
+          <div class="field-row">
+            <div class="field grow">
+              <label>Model ID</label>
+              <div class="value" id="traeModelId">-</div>
+            </div>
+            <button class="ghost" data-copy="traeModelId">Salin</button>
+          </div>
+
+          <div class="field-row">
+            <div class="field grow">
+              <label>API Key</label>
+              <div class="value" id="traeKeyHint">Key tersimpan di perangkat ini</div>
+            </div>
+            <button class="ghost" id="copyKeyBtn">Salin key</button>
+          </div>
+
+          <p class="note">Untuk fitur agent / tool calling di Trae, pilih model <b>MiniMax-M3</b>. Model lain tetap bisa untuk chat biasa.</p>
+
+          <div class="row-actions">
+            <button class="primary" id="testConnBtn">Tes koneksi</button>
+            <span id="testResult" class="status"></span>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-api" class="view hidden">
+        <div class="panel">
+          <h2>API &amp; Snippet</h2>
+          <p class="muted">Contoh kode memakai model yang sedang dipilih.</p>
+          <div class="chips" id="snippetTabs">
+            <button class="chip active" data-snippet="curl">cURL</button>
+            <button class="chip" data-snippet="python">Python</button>
+            <button class="chip" data-snippet="node">Node.js</button>
+            <button class="chip" data-snippet="opencode">OpenCode</button>
+          </div>
+          <pre id="snippetBox" class="code"></pre>
+          <button class="ghost" id="copySnippetBtn">Salin snippet</button>
+        </div>
+      </section>
+
+      <section id="view-models" class="view hidden">
+        <div class="panel">
+          <h2>Daftar Model</h2>
+          <input id="modelSearch" type="text" placeholder="Cari model..." spellcheck="false" />
+          <div id="modelList" class="model-list"></div>
+        </div>
+      </section>
     </div>
-  </footer>
+  </div>
 
   <div id="settingsModal" class="modal hidden">
     <div class="modal-card">
-      <h3>Pengaturan</h3>
+      <h3>Masukkan API Key dulu</h3>
+      <p class="muted small">Key PAYG diawali <b>sk-sm-</b>. Key paket ada di halaman Plan Details.</p>
       <label>
         Base URL
         <input id="baseUrlInput" type="text" spellcheck="false" />
@@ -53,7 +153,7 @@
       </label>
       <div class="modal-actions">
         <button id="cancelSettings" class="ghost">Batal</button>
-        <button id="saveSettings" class="primary">Simpan</button>
+        <button id="saveSettings" class="primary">Simpan &amp; Lanjut</button>
       </div>
     </div>
   </div>
