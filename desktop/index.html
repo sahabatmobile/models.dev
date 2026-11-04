@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>SahabatMobile Desktop</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <span>SahabatMobile AI</span>
+    </div>
+    <div class="controls">
+      <select id="modelSelect" title="Pilih model"></select>
+      <button id="refreshModels" class="ghost" title="Muat ulang daftar model">Muat Model</button>
+      <button id="openSettings" class="ghost">Pengaturan</button>
+    </div>
+  </header>
+
+  <main id="chat" class="chat">
+    <div class="empty" id="emptyState">
+      <h2>Mulai percakapan</h2>
+      <p>Isi API key lewat menu Pengaturan, lalu pilih model dan kirim pesan.</p>
+    </div>
+  </main>
+
+  <footer class="composer">
+    <textarea id="input" rows="2" placeholder="Tulis pesan... (Enter kirim, Shift+Enter baris baru)"></textarea>
+    <div class="actions">
+      <span id="status" class="status"></span>
+      <button id="send" class="primary">Kirim</button>
+      <button id="stop" class="danger hidden">Stop</button>
+    </div>
+  </footer>
+
+  <div id="settingsModal" class="modal hidden">
+    <div class="modal-card">
+      <h3>Pengaturan</h3>
+      <label>
+        Base URL
+        <input id="baseUrlInput" type="text" spellcheck="false" />
+      </label>
+      <label>
+        API Key
+        <input id="apiKeyInput" type="password" placeholder="sk-sm-..." spellcheck="false" />
+      </label>
+      <p class="hint" id="keyHint"></p>
+      <label>
+        System prompt (opsional)
+        <input id="systemInput" type="text" placeholder="Kamu adalah asisten yang membantu." />
+      </label>
+      <div class="modal-actions">
+        <button id="cancelSettings" class="ghost">Batal</button>
+        <button id="saveSettings" class="primary">Simpan</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
