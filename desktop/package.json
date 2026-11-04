@@ -16,6 +16,7 @@
   "build": {
     "appId": "com.sahabatmobile.desktop",
     "productName": "SahabatMobile Desktop",
+    "icon": "build/icon.png",
     "files": [
       "main.js",
       "preload.js",
