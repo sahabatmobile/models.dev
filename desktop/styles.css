@@ -1656,3 +1656,74 @@ body.resizing {
     justify-content: flex-end;
   }
 }
+
+/* ssh disconnect */
+.ssh-disconnect {
+  color: #fca5a5;
+}
+.ssh-disconnect:hover {
+  background: #451a1a;
+  color: #fecaca;
+}
+.ssh-disconnect svg,
+.icon-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* map root option */
+.map-root-option {
+  padding: 2px 0 4px;
+}
+.map-root-check {
+  display: grid;
+  grid-template-columns: 21px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #142033;
+  cursor: pointer;
+}
+.map-root-check:hover {
+  border-color: var(--accent);
+  background: #192947;
+}
+.map-root-check input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: #3b82f6;
+}
+.map-root-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+}
+.map-root-copy strong {
+  font-size: 14px;
+}
+.map-root-copy small {
+  color: #bfdbfe;
+  font-size: 11.5px;
+}
+.map-root-path {
+  display: inline-block;
+  padding: 0 5px;
+  border: 1px solid #2563eb;
+  border-radius: 5px;
+  background: #0b1730;
+  color: #93c5fd;
+  font-family: Consolas, monospace;
+}

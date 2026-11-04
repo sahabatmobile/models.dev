@@ -384,6 +384,9 @@
       { label: 'Map drive...', disabled: !node.dir || S.target.type !== 'ssh', action: () => openMapDrive(node) },
       { label: 'Refresh', action: () => refreshExplorer() },
       { sep: true },
+      { label: 'Koneksi SSH baru...', action: () => openConnectionForm() },
+      { label: 'Putuskan SSH', disabled: S.target.type !== 'ssh', action: () => disconnectRemote() },
+      { sep: true },
       { label: 'Delete', action: () => deleteEntry(node) }
     ]);
   }
@@ -401,6 +404,8 @@
       { sep: true },
       { label: 'Buka di terminal', disabled: !dir, action: () => openInTerminal({ path: dir, name: baseName(dir), dir: true }) },
       { label: 'Map drive...', disabled: !dir || S.target.type !== 'ssh', action: () => openMapDrive({ path: dir, name: baseName(dir), dir: true }) },
+      { label: 'Koneksi SSH baru...', action: () => openConnectionForm() },
+      { label: 'Putuskan SSH', disabled: S.target.type !== 'ssh', action: () => disconnectRemote() },
       { label: 'Refresh', action: () => refreshExplorer() }
     ]);
   }
@@ -493,6 +498,7 @@
   function updateExplorerChrome() {
     const remote = S.target.type !== 'local';
     $('disconnectRemote').classList.toggle('hidden', !remote);
+    $('sshDisconnectTop').classList.toggle('hidden', S.target.type !== 'ssh');
     $('mapDriveTop').classList.toggle('hidden', S.target.type !== 'ssh');
     $('openFolder').classList.toggle('hidden', remote);
     $('cloneRepo').classList.toggle('hidden', remote);
@@ -1930,6 +1936,7 @@
       $('mapHint').textContent = '';
     });
     $('mapRoot').addEventListener('change', syncMapDrivePathLabel);
+    $('sshDisconnectTop').addEventListener('click', disconnectRemote);
     $('mapDriveTop').addEventListener('click', () => openMapDrive(null));
     $('savedConnections').addEventListener('click', openSavedConnections);
     $('closeConnections').addEventListener('click', closeSavedConnections);

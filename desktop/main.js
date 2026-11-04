@@ -1174,6 +1174,8 @@ function createWindow() {
             out.mapRoot = !!document.querySelector('#mapRoot');
             out.mapDriveTop = !!document.querySelector('#mapDriveTop');
             out.connectionsModal = !!document.querySelector('#connectionsModal');
+            out.sshDisconnectTop = !!document.querySelector('#sshDisconnectTop');
+            out.mapRootOption = !!document.querySelector('.map-root-option');
             out.savedConnectionsButton = !!document.querySelector('#savedConnections');
             const savedList = await window.sahabat.listConnections();
             out.savedList = savedList.ok ? savedList.connections.length : -1;

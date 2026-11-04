@@ -43,7 +43,8 @@
         </div>
         <div class="target-bar">
           <select id="targetSelect" title="Target explorer"></select>
-          <button id="mapDriveTop" class="icon-btn hidden" title="Map drive VPS ke Windows"><svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 12h2M16 12h2M10 17v2M14 17v2"/></svg></button>
+          <button id="mapDriveTop" class="icon-btn hidden" title="Map seluruh VPS ke drive Windows"><svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 12h2M16 12h2M10 17v2M14 17v2"/></svg></button>
+          <button id="sshDisconnectTop" class="icon-btn hidden ssh-disconnect" title="Putuskan koneksi SSH"><svg viewBox="0 0 24 24"><path d="M8 16l-5-5 5-5"/><path d="M3 11h10"/><path d="M15 8l5 5-5 5"/><path d="M21 13h-10"/><path d="M5 4l14 16"/></svg></button>
           <button id="newConnection" class="icon-btn" title="Koneksi SSH / FTP baru">＋</button>
         </div>
         <div class="root-path small muted" id="wsRoot">Belum ada folder</div>
@@ -297,7 +298,15 @@
     <div class="modal-card map-card">
       <h3>Map Drive VPS</h3>
       <p class="muted small" id="mapDrivePath">/</p>
-      <label class="mini-check"><input id="mapRoot" type="checkbox" checked /> Map seluruh VPS (mount <code>/</code>)</label>
+      <div class="map-root-option">
+        <label class="map-root-check" for="mapRoot">
+          <input id="mapRoot" type="checkbox" checked />
+          <span class="map-root-copy">
+            <strong>Map seluruh VPS</strong>
+            <small>Mount root <span class="map-root-path">/</span> agar semua file dan folder tampil</small>
+          </span>
+        </label>
+      </div>
       <label>Metode
         <select id="mapMethod">
           <option value="rclone">rclone + WinFsp (SFTP)</option>
