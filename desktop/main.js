@@ -129,6 +129,10 @@ function createWindow() {
     win.webContents.on('did-finish-load', () => {
       setTimeout(async () => {
         try {
+          const tf = path.join(os.tmpdir(), 'sahabat-smoke-entry');
+          fs.rmSync(tf, { recursive: true, force: true });
+          fs.mkdirSync(path.join(tf, 'sub'), { recursive: true });
+          fs.writeFileSync(path.join(tf, 'a.txt'), 'data-a');
           const result = await win.webContents.executeJavaScript(`(async () => {
             const out = {};
             out.ace = typeof window.ace;
@@ -139,8 +143,60 @@ function createWindow() {
             out.agentPanel = !!document.querySelector('#agentLog');
             out.activity = document.querySelectorAll('.act').length;
             out.sidepanel = !!document.querySelector('#explorerPane');
+            const ed = ace.edit(document.getElementById('editor'));
+            ed.setValue('hello');
+            ed.navigateFileEnd();
+            ed.insert(' world');
+            out.editValue = ed.getValue();
+            out.readOnly = ed.getReadOnly();
+            out.editable = ed.getValue() === 'hello world';
+            document.getElementById('editor').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 120, clientY: 120 }));
+            await new Promise(r => setTimeout(r, 60));
+            out.editorMenu = Array.from(document.querySelectorAll('#contextMenu .context-item')).map(b => b.textContent);
+            document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            document.getElementById('fileTree').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 220, clientY: 260 }));
+            await new Promise(r => setTimeout(r, 60));
+            out.treeMenu = Array.from(document.querySelectorAll('#contextMenu .context-item')).map(b => b.textContent);
+            document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            out.clipboardApi = typeof window.sahabat.readClipboard;
+            out.entryApi = typeof window.sahabat.entryCopy + '/' + typeof window.sahabat.entryMove;
+            out.searchbox = typeof ace.require('ace/ext/searchbox');
+            const tf = ${JSON.stringify(tf)};
+            const tgt = { type: 'local', id: null };
+            const cp = await window.sahabat.entryCopy({ srcTarget: tgt, srcPath: tf + '\\\\a.txt', dstTarget: tgt, dstDir: tf + '\\\\sub', isDir: false });
+            const mv = await window.sahabat.entryMove({ srcTarget: tgt, srcPath: tf + '\\\\a.txt', dstTarget: tgt, dstPath: tf + '\\\\b.txt', isDir: false });
+            out.fileOps = { cp: cp.ok, mv: mv.ok, cpErr: cp.error || '', mvErr: mv.error || '' };
+            ed.focus();
+            ed.navigateFileEnd();
+            out.focused = ed.isFocused();
             return out;
           })()`);
+          win.webContents.sendInputEvent({ type: 'char', keyCode: 'X' });
+          win.webContents.sendInputEvent({ type: 'char', keyCode: 'Y' });
+          await new Promise((r) => setTimeout(r, 200));
+          result.typedValue = await win.webContents.executeJavaScript(`ace.edit(document.getElementById('editor')).getValue()`);
+          result.typedOk = String(result.typedValue).endsWith('XY');
+          const prevClip = clipboard.readText();
+          await win.webContents.executeJavaScript(`(() => { const ed = ace.edit(document.getElementById('editor')); ed.focus(); ed.selectAll(); return true; })()`);
+          win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Control' });
+          win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'C', modifiers: ['control'] });
+          win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'C', modifiers: ['control'] });
+          win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Control' });
+          await new Promise((r) => setTimeout(r, 200));
+          result.copyOk = clipboard.readText() === 'hello worldXY';
+          clipboard.writeText('ZZZ');
+          await win.webContents.executeJavaScript(`(() => { const ed = ace.edit(document.getElementById('editor')); ed.focus(); ed.navigateFileEnd(); return true; })()`);
+          win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Control' });
+          win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'V', modifiers: ['control'] });
+          win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'V', modifiers: ['control'] });
+          win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Control' });
+          await new Promise((r) => setTimeout(r, 200));
+          result.pasteOk = String(await win.webContents.executeJavaScript(`ace.edit(document.getElementById('editor')).getValue()`)).endsWith('ZZZ');
+          clipboard.writeText(prevClip);
+          result.fileOps.moved = fs.readFileSync(path.join(tf, 'b.txt'), 'utf8') === 'data-a';
+          result.fileOps.copied = fs.readFileSync(path.join(tf, 'sub', 'a.txt'), 'utf8') === 'data-a';
+          fs.rmSync(tf, { recursive: true, force: true });
+          result.fileOps.cleaned = !fs.existsSync(tf);
           console.log('SMOKE_RESULT ' + JSON.stringify(result));
         } catch (err) {
           console.log('SMOKE_ERR ' + err.message);
@@ -371,6 +427,175 @@ function resolveAgentTarget(target) {
   return { kind: 'local' };
 }
 
+// ---------- generic entry operations (local + remote) ----------
+
+function targetSession(target) {
+  if (target && target.id) return getRemote(target.id);
+  return null;
+}
+
+function isRemoteTarget(target) {
+  return Boolean(target && target.id);
+}
+
+function joinForRemote(remote, dir, name) {
+  return remote ? posix.join(dir, name) : path.join(dir, name);
+}
+
+function basenameForRemote(remote, p) {
+  return remote ? posix.basename(p) : path.basename(p);
+}
+
+function dirnameForRemote(remote, p) {
+  return remote ? posix.dirname(p) : path.dirname(p);
+}
+
+async function listRaw(session, dir) {
+  if (!session) {
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    return entries.map((e) => ({ name: e.name, path: path.join(dir, e.name), dir: e.isDirectory() }));
+  }
+  return remoteList(session, dir);
+}
+
+async function readRaw(session, filePath) {
+  if (!session) return fs.promises.readFile(filePath);
+  if (session.type === 'ssh') {
+    return new Promise((resolve, reject) => {
+      session.sftp.readFile(filePath, (err, data) => (err ? reject(err) : resolve(data)));
+    });
+  }
+  const tmp = path.join(os.tmpdir(), 'sahabat-rc-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+  try {
+    await session.client.downloadTo(tmp, filePath);
+    return await fs.promises.readFile(tmp);
+  } finally {
+    try { await fs.promises.unlink(tmp); } catch {}
+  }
+}
+
+async function writeRaw(session, filePath, buffer) {
+  if (!session) {
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.promises.writeFile(filePath, buffer);
+    return;
+  }
+  if (session.type === 'ssh') {
+    const parent = posix.dirname(filePath);
+    if (parent && parent !== '/' && parent !== '.') {
+      await new Promise((resolve) => session.sftp.mkdir(parent, () => resolve()));
+    }
+    await new Promise((resolve, reject) => {
+      session.sftp.writeFile(filePath, buffer, (err) => (err ? reject(err) : resolve()));
+    });
+    return;
+  }
+  const tmp = path.join(os.tmpdir(), 'sahabat-wc-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+  const prev = await session.client.pwd();
+  try {
+    await fs.promises.writeFile(tmp, buffer);
+    const parent = posix.dirname(filePath);
+    if (parent && parent !== '/' && parent !== '.') {
+      try { await session.client.ensureDir(parent); } catch {}
+    }
+    await session.client.uploadFrom(tmp, filePath);
+  } finally {
+    try { await session.client.cd(prev); } catch {}
+    try { await fs.promises.unlink(tmp); } catch {}
+  }
+}
+
+async function mkdirRaw(session, dirPath) {
+  if (!session) {
+    await fs.promises.mkdir(dirPath, { recursive: true });
+    return;
+  }
+  if (session.type === 'ssh') {
+    await new Promise((resolve, reject) => {
+      session.sftp.mkdir(dirPath, (err) => {
+        if (err && err.code !== 4) reject(err);
+        else resolve();
+      });
+    });
+    return;
+  }
+  const prev = await session.client.pwd();
+  try {
+    await session.client.ensureDir(dirPath);
+  } finally {
+    try { await session.client.cd(prev); } catch {}
+  }
+}
+
+async function removeRaw(session, targetPath, isDir) {
+  if (!session) {
+    if (isDir) rmTree(targetPath);
+    else await fs.promises.unlink(targetPath);
+    return;
+  }
+  if (isDir) {
+    const items = await remoteList(session, targetPath);
+    for (const item of items) await removeRaw(session, item.path, item.dir);
+    if (session.type === 'ssh') {
+      await new Promise((resolve, reject) => session.sftp.rmdir(targetPath, (err) => (err ? reject(err) : resolve())));
+    } else {
+      await session.client.removeDir(targetPath);
+    }
+    return;
+  }
+  if (session.type === 'ssh') {
+    await new Promise((resolve, reject) => session.sftp.unlink(targetPath, (err) => (err ? reject(err) : resolve())));
+  } else {
+    await session.client.remove(targetPath);
+  }
+}
+
+async function copyEntry(srcSession, srcPath, dstSession, dstPath, isDir) {
+  if (isDir) {
+    await mkdirRaw(dstSession, dstPath);
+    const items = await listRaw(srcSession, srcPath);
+    for (const item of items) {
+      const childDst = dstSession ? posix.join(dstPath, item.name) : path.join(dstPath, item.name);
+      await copyEntry(srcSession, item.path, dstSession, childDst, item.dir);
+    }
+    return;
+  }
+  const buffer = await readRaw(srcSession, srcPath);
+  await writeRaw(dstSession, dstPath, buffer);
+}
+
+async function uniqueDestination(session, dir, name) {
+  let names;
+  try {
+    names = new Set((await listRaw(session, dir)).map((i) => i.name));
+  } catch {
+    names = new Set();
+  }
+  if (!names.has(name)) return joinForRemote(session, dir, name);
+  const dot = name.lastIndexOf('.');
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  let i = 1;
+  while (names.has(base + ' (' + i + ')' + ext)) i += 1;
+  return joinForRemote(session, dir, base + ' (' + i + ')' + ext);
+}
+
+async function fastRename(srcSession, srcPath, dstSession, dstPath) {
+  if (!srcSession && !dstSession) {
+    try { await fs.promises.rename(srcPath, dstPath); return true; } catch { return false; }
+  }
+  if (srcSession && dstSession && srcSession === dstSession && srcSession.type === 'ssh') {
+    try {
+      await new Promise((resolve, reject) => srcSession.sftp.rename(srcPath, dstPath, (err) => (err ? reject(err) : resolve())));
+      return true;
+    } catch { return false; }
+  }
+  if (srcSession && dstSession && srcSession === dstSession && srcSession.type === 'ftp') {
+    try { await srcSession.client.rename(srcPath, dstPath); return true; } catch { return false; }
+  }
+  return false;
+}
+
 app.whenReady().then(() => {
   storedKey = loadKey();
   createWindow();
@@ -404,6 +629,8 @@ ipcMain.handle('clipboard:write', (event, text) => {
   clipboard.writeText(String(text || ''));
   return { ok: true };
 });
+
+ipcMain.handle('clipboard:read', () => ({ ok: true, text: clipboard.readText() }));
 
 ipcMain.handle('settings:set', (event, payload) => {
   const data = readSettings();
@@ -654,6 +881,44 @@ ipcMain.handle('fs:remove', async (event, filePath) => {
     if (st.isDirectory()) rmTree(abs);
     else await fs.promises.unlink(abs);
     return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('entry:copy', async (event, payload) => {
+  try {
+    const srcSession = targetSession(payload.srcTarget);
+    const dstSession = targetSession(payload.dstTarget);
+    const name = basenameForRemote(Boolean(srcSession), payload.srcPath);
+    const destPath = await uniqueDestination(dstSession, payload.dstDir, name);
+    await copyEntry(srcSession, payload.srcPath, dstSession, destPath, Boolean(payload.isDir));
+    if (payload.cut) await removeRaw(srcSession, payload.srcPath, Boolean(payload.isDir));
+    return { ok: true, path: destPath };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('entry:move', async (event, payload) => {
+  try {
+    const srcSession = targetSession(payload.srcTarget);
+    const dstSession = targetSession(payload.dstTarget);
+    if (srcSession === dstSession) {
+      const done = await fastRename(srcSession, payload.srcPath, dstSession, payload.dstPath);
+      if (done) return { ok: true, path: payload.dstPath };
+    }
+    if (!payload.overwrite) {
+      const parent = dirnameForRemote(Boolean(dstSession), payload.dstPath);
+      const name = basenameForRemote(Boolean(dstSession), payload.dstPath);
+      const items = await listRaw(dstSession, parent).catch(() => []);
+      if (items.some((i) => i.name === name)) {
+        return { ok: false, error: 'Tujuan sudah ada: ' + payload.dstPath };
+      }
+    }
+    await copyEntry(srcSession, payload.srcPath, dstSession, payload.dstPath, Boolean(payload.isDir));
+    await removeRaw(srcSession, payload.srcPath, Boolean(payload.isDir));
+    return { ok: true, path: payload.dstPath };
   } catch (err) {
     return { ok: false, error: err.message };
   }

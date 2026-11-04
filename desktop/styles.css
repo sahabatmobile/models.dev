@@ -1086,3 +1086,31 @@ button.block {
     flex: 0 0 226px;
   }
 }
+
+/* context menu */
+.context-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 190px;
+  padding: 4px;
+  background: #161b22;
+  border: 1px solid #2a3340;
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+.context-menu.hidden { display: none; }
+.context-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: #dfe6f0;
+  padding: 7px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+.context-item:hover:not(:disabled) { background: #2563eb; color: #fff; }
+.context-item:disabled { opacity: 0.4; cursor: default; }
+.context-sep { height: 1px; background: #2a3340; margin: 4px 6px; }

@@ -79,7 +79,8 @@
     terms: { local: { term: null, fit: null, id: null, cwd: null }, remote: { term: null, fit: null, sessionId: null } },
     agent: { messages: [], busy: false },
     snippet: 'curl',
-    cloneDir: null
+    cloneDir: null,
+    clipboard: null
   };
 
   const $ = (id) => document.getElementById(id);
@@ -227,13 +228,13 @@
           $('fileTree').innerHTML = '';
           renderTreeNodes(S.local.tree, 0);
         });
-        row.addEventListener('contextmenu', (e) => removeEntry(e, node));
+        row.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); showEntryMenu(e.clientX, e.clientY, node); });
         box.appendChild(row);
         if (open) renderTreeNodes(node.children || [], depth + 1);
       } else {
         row.innerHTML = '<span class="caret">·</span><span class="fname">' + esc(node.name) + '</span>';
         row.addEventListener('click', () => openFile(node.path));
-        row.addEventListener('contextmenu', (e) => removeEntry(e, node));
+        row.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); showEntryMenu(e.clientX, e.clientY, node); });
         box.appendChild(row);
       }
     }
@@ -264,22 +265,158 @@
         if (item.dir) loadRemoteDir(item.path);
         else openFile(item.path);
       });
-      row.addEventListener('contextmenu', (e) => removeEntry(e, item));
+      row.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); showEntryMenu(e.clientX, e.clientY, item); });
       $('fileTree').appendChild(row);
     }
   }
 
-  async function removeEntry(e, node) {
-    e.preventDefault();
+  function currentTarget() {
+    return { type: S.target.type, id: S.target.id };
+  }
+
+  function parentPathOf(p) {
+    const s = String(p || '');
+    if (S.target.type !== 'local') {
+      const d = s.replace(/\/+[^/]+\/?$/, '');
+      return d || '/';
+    }
+    const idx = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/'));
+    if (idx < 0) return s;
+    if (idx === 2 && /^[A-Za-z]:/.test(s)) return s.slice(0, 3);
+    return s.slice(0, idx);
+  }
+
+  function joinForTarget(dir, name) {
+    if (S.target.type !== 'local') return joinRemote(dir, name);
+    return String(dir || '').replace(/[\\/]+$/, '') + '/' + name;
+  }
+
+  function hideContextMenu() {
+    const menu = $('contextMenu');
+    menu.classList.add('hidden');
+    menu.innerHTML = '';
+  }
+
+  function showContextMenu(x, y, items) {
+    const menu = $('contextMenu');
+    menu.innerHTML = '';
+    for (const item of items) {
+      if (item.sep) {
+        const sep = document.createElement('div');
+        sep.className = 'context-sep';
+        menu.appendChild(sep);
+        continue;
+      }
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'context-item';
+      btn.textContent = item.label;
+      btn.disabled = Boolean(item.disabled);
+      btn.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        hideContextMenu();
+        try { await item.action(); } catch (err) { toast(err.message || 'Gagal'); }
+      });
+      menu.appendChild(btn);
+    }
+    menu.classList.remove('hidden');
+    const rect = menu.getBoundingClientRect();
+    menu.style.left = Math.max(6, Math.min(x, window.innerWidth - rect.width - 6)) + 'px';
+    menu.style.top = Math.max(6, Math.min(y, window.innerHeight - rect.height - 6)) + 'px';
+  }
+
+  function showEntryMenu(x, y, node) {
+    const target = currentTarget();
+    const folder = node.dir ? node.path : parentPathOf(node.path);
+    showContextMenu(x, y, [
+      { label: 'Edit', disabled: node.dir, action: () => openFile(node.path) },
+      { label: 'Rename', action: () => renameEntry(node) },
+      { label: 'Move to...', action: () => moveEntry(node) },
+      { sep: true },
+      { label: 'Copy', action: () => { S.clipboard = { target, path: node.path, name: node.name, isDir: node.dir, cut: false }; toast('Disalin: ' + node.name); } },
+      { label: 'Cut', action: () => { S.clipboard = { target, path: node.path, name: node.name, isDir: node.dir, cut: true }; toast('Siap dipindah: ' + node.name); } },
+      { label: 'Paste', disabled: !S.clipboard, action: () => pasteInto(folder) },
+      { label: 'Copy path', action: async () => { await api.copyText(node.path); toast('Path disalin'); } },
+      { sep: true },
+      { label: 'New file', action: () => createEntry('file', folder) },
+      { label: 'New folder', action: () => createEntry('dir', folder) },
+      { sep: true },
+      { label: 'Delete', action: () => deleteEntry(node) }
+    ]);
+  }
+
+  function showBlankMenu(x, y) {
     const session = remoteSession();
-    const where = session ? session.type.toUpperCase() : 'lokal';
+    const dir = session ? (session.dir || session.home) : S.local.root;
+    showContextMenu(x, y, [
+      { label: 'New file', disabled: !dir, action: () => createEntry('file', dir) },
+      { label: 'New folder', disabled: !dir, action: () => createEntry('dir', dir) },
+      { label: 'Paste', disabled: !S.clipboard || !dir, action: () => pasteInto(dir) },
+      { sep: true },
+      { label: 'Refresh', action: () => refreshExplorer() }
+    ]);
+  }
+
+  async function deleteEntry(node) {
+    const where = S.target.type === 'local' ? 'lokal' : S.target.type.toUpperCase();
     if (!confirm('Hapus ' + (node.dir ? 'folder ' : 'file ') + node.name + ' dari explorer ' + where + '?')) return;
-    const res = session
-      ? await api.remoteRemove(session.id, node.path, node.dir)
-      : await api.removeFile(node.path);
+    const res = S.target.type === 'local'
+      ? await api.removeFile(node.path)
+      : await api.remoteRemove(S.target.id, node.path, node.dir);
     if (!res.ok) { toast(res.error || 'Gagal menghapus'); return; }
     await refreshExplorer();
     toast('Dihapus: ' + node.name);
+  }
+
+  async function renameEntry(node) {
+    const name = await askText('Rename', 'Nama baru', 'Rename', node.name);
+    if (!name || name === node.name) return;
+    if (/[\\/]/.test(name)) { toast('Nama tidak boleh mengandung / atau \\'); return; }
+    const dstPath = joinForTarget(parentPathOf(node.path), name);
+    const res = await api.entryMove({ srcTarget: currentTarget(), srcPath: node.path, dstTarget: currentTarget(), dstPath, isDir: node.dir });
+    if (!res.ok) { toast(res.error || 'Gagal rename'); return; }
+    for (const tab of S.tabs) {
+      if (!node.dir && tab.path === node.path) {
+        tab.path = dstPath;
+        tab.name = name;
+        tab.key = tabKey(tab.target, dstPath);
+      } else if (node.dir && tab.path.startsWith(node.path)) {
+        tab.path = dstPath + tab.path.slice(node.path.length);
+        tab.key = tabKey(tab.target, tab.path);
+      }
+    }
+    renderTabs();
+    await refreshExplorer();
+    toast('Diubah nama: ' + name);
+  }
+
+  async function moveEntry(node) {
+    const destDir = await askText('Pindahkan ke folder', 'Path folder tujuan', 'Pindah', parentPathOf(node.path));
+    if (!destDir) return;
+    const dstPath = joinForTarget(destDir.replace(/[\\/]+$/, ''), node.name);
+    if (dstPath === node.path) return;
+    const res = await api.entryMove({ srcTarget: currentTarget(), srcPath: node.path, dstTarget: currentTarget(), dstPath, isDir: node.dir });
+    if (!res.ok) { toast(res.error || 'Gagal memindahkan'); return; }
+    await refreshExplorer();
+    toast('Dipindah ke ' + dstPath);
+  }
+
+  async function pasteInto(destDir) {
+    if (!S.clipboard) { toast('Clipboard kosong'); return; }
+    if (!destDir) { toast('Pilih folder tujuan dulu'); return; }
+    const src = S.clipboard;
+    const res = await api.entryCopy({
+      srcTarget: src.target,
+      srcPath: src.path,
+      dstTarget: currentTarget(),
+      dstDir: destDir,
+      isDir: src.isDir,
+      cut: src.cut
+    });
+    if (!res.ok) { toast(res.error || 'Gagal paste'); return; }
+    if (src.cut) S.clipboard = null;
+    await refreshExplorer();
+    toast(src.cut ? 'Dipindah' : 'Paste selesai');
   }
 
   async function refreshExplorer() {
@@ -438,6 +575,7 @@
     const editor = ace.edit(elId);
     editor.setTheme('ace/theme/tomorrow_night');
     editor.session.setUseWorker(false);
+    editor.setReadOnly(false);
     editor.setOptions({
       fontSize: '13px',
       fontFamily: 'Consolas, ui-monospace, monospace',
@@ -445,7 +583,22 @@
       useSoftTabs: true,
       tabSize: 2,
       wrap: false,
-      highlightActiveLine: true
+      highlightActiveLine: true,
+      displayIndentGuides: true,
+      showFoldWidgets: true,
+      enableBasicAutocompletion: true,
+      enableSnippets: true,
+      enableLiveAutocompletion: false
+    });
+    editor.commands.addCommand({
+      name: 'gotoLineCustom',
+      bindKey: { win: 'Ctrl-G', mac: 'Cmd-G' },
+      exec: () => gotoEditorLine()
+    });
+    editor.container.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showEditorMenu(e.clientX, e.clientY);
     });
     return editor;
   }
@@ -467,6 +620,7 @@
         S.active = tab;
         S.editor.setSession(tab.session);
         renderTabs();
+        S.editor.focus();
       });
       bar.appendChild(el);
     }
@@ -485,6 +639,7 @@
       S.active = existing;
       S.editor.setSession(existing.session);
       renderTabs();
+      S.editor.focus();
       return;
     }
     const res = target.type === 'local'
@@ -500,6 +655,7 @@
     S.active = tab;
     S.editor.setSession(session);
     renderTabs();
+    setTimeout(() => S.editor.focus(), 30);
   }
 
   function closeTab(tab) {
@@ -527,27 +683,85 @@
     toast('Tersimpan: ' + tab.name);
   }
 
-  async function createEntry(kind) {
+  async function createEntry(kind, targetDir) {
     const name = await askText(kind === 'file' ? 'Nama file baru' : 'Nama folder baru', kind === 'file' ? 'mis. index.html' : 'mis. src');
     if (!name) return;
+    if (/[\\/]/.test(name)) { toast('Nama tidak boleh mengandung / atau \\'); return; }
     const session = remoteSession();
     let created;
+    let full;
     if (session) {
-      const parent = session.dir || session.home;
-      const full = joinRemote(parent, name);
+      const parent = targetDir || session.dir || session.home;
+      full = joinRemote(parent, name);
       created = kind === 'file' ? await api.remoteWriteFile(session.id, full, '') : await api.remoteMkdir(session.id, full);
     } else {
       if (!S.local.root) { toast('Buka folder dulu.'); return; }
-      const full = S.local.root.replace(/[\\/]+$/, '') + '/' + name;
+      const parent = targetDir || S.local.root;
+      full = joinForTarget(parent, name);
       created = kind === 'file' ? await api.writeFile(full, '') : await api.mkdir(full);
     }
     if (!created.ok) { toast(created.error || 'Gagal membuat'); return; }
     await refreshExplorer();
-    if (kind === 'file') {
-      const session2 = remoteSession();
-      const base = session2 ? (session2.dir || session2.home) : S.local.root;
-      openFile(joinRemote(base, name));
+    if (kind === 'file') openFile(full);
+  }
+
+  // ---------- Editor context menu ----------
+  function insertAtCursor(text) {
+    if (!S.editor) return;
+    S.editor.session.insert(S.editor.getCursorPosition(), text);
+    S.editor.focus();
+  }
+
+  async function gotoEditorLine() {
+    const value = await askText('Ke baris', 'Nomor baris', 'Ke baris');
+    const line = parseInt(value, 10);
+    if (line > 0 && S.editor) {
+      S.editor.gotoLine(line, 0, true);
+      S.editor.focus();
     }
+  }
+
+  function showEditorMenu(x, y) {
+    const ed = S.editor;
+    if (!ed) return;
+    const hasSel = ed.getSelectedText().length > 0;
+    showContextMenu(x, y, [
+      { label: 'Undo', action: () => { ed.undo(); ed.focus(); } },
+      { label: 'Redo', action: () => { ed.redo(); ed.focus(); } },
+      { sep: true },
+      {
+        label: 'Cut', disabled: !hasSel, action: async () => {
+          await api.copyText(ed.getSelectedText());
+          ed.session.remove(ed.getSelectionRange());
+          ed.focus();
+        }
+      },
+      { label: 'Copy', disabled: !hasSel, action: async () => { await api.copyText(ed.getSelectedText()); ed.focus(); } },
+      {
+        label: 'Paste', action: async () => {
+          const res = await api.readClipboard();
+          if (res.ok && res.text) insertAtCursor(res.text);
+        }
+      },
+      {
+        label: 'Delete', action: () => {
+          if (hasSel) ed.session.remove(ed.getSelectionRange());
+          else {
+            const pos = ed.getCursorPosition();
+            ed.session.remove({ start: pos, end: { row: pos.row, column: pos.column + 1 } });
+          }
+          ed.focus();
+        }
+      },
+      { label: 'Select all', action: () => { ed.selectAll(); ed.focus(); } },
+      { sep: true },
+      { label: 'Find', action: () => { ed.focus(); ed.execCommand('find'); } },
+      { label: 'Replace', action: () => { ed.focus(); ed.execCommand('replace'); } },
+      { label: 'Go to line', action: () => gotoEditorLine() },
+      { label: 'Toggle comment', action: () => { ed.toggleCommentLines(); ed.focus(); } },
+      { sep: true },
+      { label: 'Save', disabled: !S.active, action: () => saveActive() }
+    ]);
   }
 
   // ---------- Terminal ----------
@@ -912,13 +1126,16 @@
   }
 
   let promptResolve = null;
-  function askText(title, placeholder, okLabel) {
+  function askText(title, placeholder, okLabel, defaultValue) {
     $('promptTitle').textContent = title;
-    $('promptInput').value = '';
+    $('promptInput').value = defaultValue || '';
     $('promptInput').placeholder = placeholder || '';
     $('promptOk').textContent = okLabel || 'Buat';
     $('promptModal').classList.remove('hidden');
-    setTimeout(() => $('promptInput').focus(), 50);
+    setTimeout(() => {
+      $('promptInput').focus();
+      if (defaultValue) $('promptInput').select();
+    }, 50);
     return new Promise((resolve) => { promptResolve = resolve; });
   }
 
@@ -988,6 +1205,13 @@
     $('refreshExplorer').addEventListener('click', refreshExplorer);
     $('newFile').addEventListener('click', () => createEntry('file'));
     $('newFolder').addEventListener('click', () => createEntry('dir'));
+    $('fileTree').addEventListener('contextmenu', (e) => {
+      if (e.target.closest('.tree-row')) return;
+      e.preventDefault();
+      showBlankMenu(e.clientX, e.clientY);
+    });
+    document.addEventListener('click', hideContextMenu);
+    document.addEventListener('scroll', hideContextMenu, true);
 
     $('clonePick').addEventListener('click', pickCloneDir);
     $('cloneCancel').addEventListener('click', () => $('cloneModal').classList.add('hidden'));
@@ -1043,6 +1267,7 @@
         if (S.view === 'workspace') saveActive();
       }
       if (e.key === 'Escape') {
+        hideContextMenu();
         if (!$('promptModal').classList.contains('hidden')) closePrompt(null);
         if (!$('cloneModal').classList.contains('hidden')) $('cloneModal').classList.add('hidden');
         if (!$('settingsModal').classList.contains('hidden')) $('settingsModal').classList.add('hidden');

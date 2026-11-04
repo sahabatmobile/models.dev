@@ -13,6 +13,9 @@ contextBridge.exposeInMainWorld('sahabat', {
   saveSettings: (payload) => ipcRenderer.invoke('settings:set', payload),
   copyKey: () => ipcRenderer.invoke('settings:copyKey'),
   copyText: (text) => ipcRenderer.invoke('clipboard:write', text),
+  readClipboard: () => ipcRenderer.invoke('clipboard:read'),
+  entryCopy: (payload) => ipcRenderer.invoke('entry:copy', payload),
+  entryMove: (payload) => ipcRenderer.invoke('entry:move', payload),
 
   listModels: () => ipcRenderer.invoke('models:list'),
   startChat: (payload) => ipcRenderer.invoke('chat:start', payload),
