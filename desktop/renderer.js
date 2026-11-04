@@ -73,6 +73,7 @@
     local: { root: null, tree: [], expanded: new Set() },
     target: { type: 'local', id: null },
     connections: [],
+    savedConnections: [],
     remotes: new Map(),
     editor: null,
     tabs: [],
@@ -215,17 +216,48 @@
     localOpt.value = 'local';
     localOpt.textContent = 'Lokal';
     sel.appendChild(localOpt);
-    for (const c of S.connections) {
-      const opt = document.createElement('option');
-      opt.value = c.id;
-      opt.textContent = c.label;
-      sel.appendChild(opt);
+
+    if (S.savedConnections.length) {
+      const group = document.createElement('optgroup');
+      group.label = 'Tersimpan';
+      for (const profile of S.savedConnections) {
+        const opt = document.createElement('option');
+        opt.value = 'saved:' + profile.id;
+        const protocol = String(profile.protocol || 'sftp').toUpperCase();
+        const label = protocol + ' · ' + (profile.username || '?') + '@' + (profile.host || '?') + ':' + (profile.port || (profile.protocol === 'sftp' ? 22 : 21));
+        opt.textContent = label;
+        opt.title = profile.name || label;
+        group.appendChild(opt);
+      }
+      sel.appendChild(group);
+    }
+
+    if (S.connections.length) {
+      const group = document.createElement('optgroup');
+      group.label = 'Terhubung';
+      for (const c of S.connections) {
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = c.label;
+        group.appendChild(opt);
+      }
+      sel.appendChild(group);
     }
     sel.value = targetValue();
   }
 
   function setSideStatus(text) {
     $('sideStatus').textContent = text;
+  }
+
+  async function refreshSavedConnections() {
+    try {
+      const res = await api.listConnections();
+      S.savedConnections = res.ok && Array.isArray(res.connections) ? res.connections : [];
+    } catch {
+      S.savedConnections = [];
+    }
+    renderTargetSelect();
   }
 
   function remoteSession() {
@@ -542,11 +574,18 @@
   }
 
   async function switchTarget(value) {
+    if (value.startsWith('saved:')) {
+      await connectSavedProfile(value.slice(6));
+      return;
+    }
     if (value === 'local') {
       S.target = { type: 'local', id: null };
     } else {
       const conn = S.connections.find((c) => c.id === value);
-      if (!conn) return;
+      if (!conn) {
+        renderTargetSelect();
+        return;
+      }
       S.target = { type: conn.type, id: conn.id };
     }
     renderTargetSelect();
@@ -601,6 +640,7 @@
     S.connections.push(conn);
     S.remotes.set(res.id, conn);
     if (res.saved) toast('Koneksi tersimpan: ' + res.saved.name);
+    if (res.saved) await refreshSavedConnections();
     renderTargetSelect();
     closeConnectionForm();
     await switchTarget(res.id);
@@ -655,6 +695,7 @@
         const result = await api.removeConnection(item.id);
         if (!result.ok) { toast(result.error || 'Gagal menghapus koneksi'); return; }
         await renderSavedConnections();
+        await refreshSavedConnections();
         toast('Koneksi dihapus');
       });
       actions.appendChild(connect);
@@ -1409,6 +1450,42 @@
     $('mapDrivePath').textContent = $('mapRoot').checked ? '/' : (S.mapTarget || '/');
   }
 
+  async function renderMapRequirement() {
+    const box = $('mapRequirement');
+    if (!box) return;
+    const res = await api.mapRequirements();
+    const rclone = res.ok && res.rclone;
+    const winfsp = res.ok && res.winfsp;
+    const missing = [];
+    if (!rclone) missing.push('rclone');
+    if (!winfsp) missing.push('WinFsp');
+    box.classList.toggle('hidden', missing.length === 0);
+    $('mapRequirementText').textContent = missing.length
+      ? 'Mount butuh ' + missing.join(' dan ') + '.'
+      : '';
+    $('mapInstallRclone').disabled = Boolean(rclone);
+    $('mapInstallRclone').textContent = rclone ? 'rclone terinstall ✓' : 'Install rclone otomatis';
+    $('mapInstallWinFsp').disabled = Boolean(winfsp);
+    $('mapInstallWinFsp').textContent = winfsp ? 'WinFsp terinstall ✓' : 'Install WinFsp...';
+  }
+
+  async function installMapRequirement(kind) {
+    const button = $(kind === 'rclone' ? 'mapInstallRclone' : 'mapInstallWinFsp');
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = kind === 'rclone' ? 'Mengunduh rclone...' : 'Mengunduh WinFsp...';
+    const res = kind === 'rclone' ? await api.mapInstallRclone() : await api.mapInstallWinFsp();
+    button.disabled = false;
+    if (!res.ok) {
+      $('mapHint').textContent = res.error || 'Gagal install';
+      button.textContent = label;
+      return;
+    }
+    $('mapHint').textContent = res.message || 'Terpasang.';
+    toast(res.message || 'Terpasang');
+    await renderMapRequirement();
+  }
+
   function openMapDrive(node) {
     if (node && !node.dir) { toast('Pilih folder VPS untuk map drive.'); return; }
     if (S.target.type !== 'ssh') { toast('Map drive VPS hanya tersedia untuk koneksi SSH/SFTP.'); return; }
@@ -1432,6 +1509,7 @@
     $('mapSmbSection').classList.add('hidden');
     $('mapModal').classList.remove('hidden');
     setTimeout(() => $('mapHost').focus(), 60);
+    renderMapRequirement();
   }
 
   function closeMapDrive() {
@@ -1924,8 +2002,8 @@
     document.addEventListener('scroll', hideContextMenu, true);
 
     $('extSearch').addEventListener('input', (e) => scheduleMarketplaceSearch(e.target.value));
-    $('downloadRclone')?.addEventListener('click', () => api.extOpenExternal('https://rclone.org/downloads/'));
-    $('downloadWinFsp')?.addEventListener('click', () => api.extOpenExternal('https://github.com/winfsp/winfsp/releases'));
+    $('mapInstallRclone').addEventListener('click', () => installMapRequirement('rclone'));
+    $('mapInstallWinFsp').addEventListener('click', () => installMapRequirement('winfsp'));
     $('mapCancel').addEventListener('click', closeMapDrive);
     $('mapModal').addEventListener('click', (e) => { if (e.target.id === 'mapModal') closeMapDrive(); });
     $('mapSubmit').addEventListener('click', submitMapDrive);
@@ -2062,7 +2140,7 @@
     S.settings = await api.getSettings();
     updateKeyBadge();
     renderModelOptions();
-    renderTargetSelect();
+    await refreshSavedConnections();
     renderSnippet();
 
     api.onTermData((d) => {

@@ -297,6 +297,14 @@
   <div id="mapModal" class="modal hidden">
     <div class="modal-card map-card">
       <h3>Map Drive VPS</h3>
+      <div id="mapRequirement" class="map-requirement hidden">
+        <div class="map-requirement-title">Tools belum lengkap</div>
+        <p id="mapRequirementText">Mount butuh rclone dan WinFsp.</p>
+        <div class="map-install-buttons">
+          <button id="mapInstallRclone" class="primary small" type="button">Install rclone otomatis</button>
+          <button id="mapInstallWinFsp" class="ghost small" type="button">Install WinFsp...</button>
+        </div>
+      </div>
       <p class="muted small" id="mapDrivePath">/</p>
       <div class="map-root-option">
         <label class="map-root-check" for="mapRoot">
@@ -347,11 +355,6 @@
           </select>
         </label>
         <p class="hint">Host key tidak diverifikasi pada mount. Untuk hanya membaca/menulis aplikasi biasa, pakai Full cache.</p>
-        <div class="map-downloads">
-          <span class="muted small">Tool dibutuhkan:</span>
-          <button id="downloadRclone" class="ghost small">Download rclone</button>
-          <button id="downloadWinFsp" class="ghost small">Download WinFsp</button>
-        </div>
       </div>
       <div id="mapSmbSection" class="map-section hidden">
         <label>UNC Share

@@ -27,8 +27,8 @@ Tahap saat ini: **mode Developer**. Mode UMKM dan 3D Creator disiapkan sebagai t
   - Bisa membaca, menulis, dan membuat file
   - Bisa menjalankan perintah (dengan konfirmasi)
   - Mendukung folder **lokal**, **SSH/SFTP**, dan **FTP/FTPS**
-- **Remote**: SSH/SFTP untuk terminal + file, FTP/FTPS untuk file. Password disimpan terenkripsi lewat OS secure storage (safeStorage) jika tersedia; klik **Koneksi tersimpan** untuk langsung terhubung tanpa isi ulang.
-- **Map drive VPS**: setelah SSH terhubung, klik tombol **Map drive** di target bar atau folder Explorer → Map drive. Secara default seluruh VPS (`/`) akan di-mount ke drive Windows (mis. `G:`). Install **rclone** dan **WinFsp** dulu; alternatif SMB via `net use`.
+- **Remote**: SSH/SFTP untuk terminal + file, FTP/FTPS untuk file. Password disimpan terenkripsi lewat OS secure storage jika tersedia. Koneksi yang tersimpan muncul langsung di target selector (grup **Tersimpan**) dan di **Koneksi tersimpan** untuk kelola/hapus.
+- **Map drive VPS**: setelah SSH terhubung, pilih folder → **Map drive**. Default me-mount **seluruh `/`** ke drive Windows. Tool yang belum ada (rclone / WinFsp) dapat di-install langsung dari dialog Map drive dengan sekali klik.
 
 Untuk agent / tool calling, gunakan **MiniMax-M3**.
 

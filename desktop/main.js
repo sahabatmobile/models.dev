@@ -873,7 +873,35 @@ function findCommand(name, fallbacks) {
   }
 }
 
+function findExecutableRecursive(root, name, maxDepth = 5) {
+  try {
+    if (!fs.existsSync(root)) return null;
+    const walk = (dir, depth) => {
+      if (depth > maxDepth) return null;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          const found = walk(full, depth + 1);
+          if (found) return found;
+        } else if (entry.name.toLowerCase() === name.toLowerCase()) {
+          return full;
+        }
+      }
+      return null;
+    };
+    return walk(root, 0);
+  } catch {
+    return null;
+  }
+}
+
+function findInstalledRclone() {
+  return findExecutableRecursive(path.join(app.getPath('userData'), 'tools', 'rclone'), 'rclone.exe');
+}
+
 function findRclone() {
+  const installed = findInstalledRclone();
+  if (installed) return installed;
   return findCommand('rclone.exe', [
     'C:\\Program Files\\rclone\\rclone.exe',
     'C:\\Program Files (x86)\\rclone\\rclone.exe',
@@ -908,6 +936,52 @@ function buildRcloneConfig(remoteName, payload, obscuredPass, obscuredKeyPass) {
   if (obscuredKeyPass) lines.push('key_file_pass = ' + obscuredKeyPass);
   return lines.join('\n') + '\n';
 }
+
+ipcMain.handle('drive:requirements', () => {
+  const rclone = findRclone();
+  const winfsp = findWinFsp();
+  return { ok: true, rclone: Boolean(rclone), winfsp: Boolean(winfsp), rclonePath: rclone || '', winfspPath: winfsp || '' };
+});
+
+ipcMain.handle('drive:installRclone', async () => {
+  try {
+    const installedDir = path.join(app.getPath('userData'), 'tools', 'rclone');
+    fs.rmSync(installedDir, { recursive: true, force: true });
+    fs.mkdirSync(installedDir, { recursive: true });
+    const buf = await fetchTextOnce('https://downloads.rclone.org/rclone-current-windows-amd64.zip', 180000, true);
+    if (buf.length > 100 * 1024 * 1024) throw new Error('Arsip rclone terlalu besar.');
+    const zip = new AdmZip(buf);
+    zip.extractAllTo(installedDir, true);
+    const exe = findExecutableRecursive(installedDir, 'rclone.exe');
+    if (!exe) throw new Error('rclone.exe tidak ditemukan di arsip.');
+    return { ok: true, path: exe, message: 'rclone berhasil terpasang di ' + path.dirname(exe) };
+  } catch (err) {
+    return { ok: false, error: 'Gagal install rclone: ' + err.message };
+  }
+});
+
+ipcMain.handle('drive:installWinFsp', async () => {
+  try {
+    const releases = await fetchJsonOnce('https://api.github.com/repos/winfsp/winfsp/releases/latest');
+    const asset = (releases.assets || []).find((item) => /\.msi$/i.test(item.name) && !/tests?/i.test(item.name));
+    if (!asset) throw new Error('Paket MSI WinFsp tidak ditemukan di rilis terbaru.');
+    const tempPath = path.join(os.tmpdir(), 'winfsp-latest.msi');
+    const buf = await fetchTextOnce(asset.browser_download_url, 240000, true);
+    if (buf.length > 100 * 1024 * 1024) throw new Error('Paket WinFsp terlalu besar.');
+    fs.writeFileSync(tempPath, buf);
+    const command = 'Start-Process -FilePath msiexec.exe -ArgumentList \'/i "' + tempPath + '" /quiet /norestart\' -Verb RunAs -Wait -PassThru | exit $_.ExitCode';
+    execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+      windowsHide: true,
+      timeout: 600000,
+      stdio: 'ignore'
+    });
+    const installed = findWinFsp();
+    if (!installed) throw new Error('WinFsp selesai dipasang tetapi belum terdeteksi. Coba restart aplikasi.');
+    return { ok: true, path: installed, message: 'WinFsp berhasil terpasang.' };
+  } catch (err) {
+    return { ok: false, error: 'Gagal install WinFsp: ' + err.message };
+  }
+});
 
 ipcMain.handle('drive:map', async (event, payload) => {
   try {
@@ -1177,6 +1251,9 @@ function createWindow() {
             out.sshDisconnectTop = !!document.querySelector('#sshDisconnectTop');
             out.mapRootOption = !!document.querySelector('.map-root-option');
             out.savedConnectionsButton = !!document.querySelector('#savedConnections');
+            out.savedTargetOptions = document.querySelectorAll('#targetSelect optgroup[label="Tersimpan"] option').length;
+            const mapRequirements = await window.sahabat.mapRequirements();
+            out.mapRequirements = { rclone: mapRequirements.rclone, winfsp: mapRequirements.winfsp };
             const savedList = await window.sahabat.listConnections();
             out.savedList = savedList.ok ? savedList.connections.length : -1;
             const missingSaved = await window.sahabat.connectSaved('smoke-missing-id');
