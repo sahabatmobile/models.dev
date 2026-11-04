@@ -3,6 +3,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('sahabat', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (payload) => ipcRenderer.invoke('settings:set', payload),
+  copyKey: () => ipcRenderer.invoke('settings:copyKey'),
+  copyText: (text) => ipcRenderer.invoke('clipboard:write', text),
   listModels: () => ipcRenderer.invoke('models:list'),
   startChat: (payload) => ipcRenderer.invoke('chat:start', payload),
   abortChat: (requestId) => ipcRenderer.invoke('chat:abort', requestId),
