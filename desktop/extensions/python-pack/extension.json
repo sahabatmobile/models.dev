@@ -1,0 +1,16 @@
+{
+  "id": "python-pack",
+  "name": "Python Snippets",
+  "version": "1.0.0",
+  "publisher": "SahabatMobile",
+  "description": "Snippet Python: def, class, if __main__, for, try/except. Aktif untuk file .py.",
+  "contributes": {
+    "snippets": {
+      "python": "snippets/python.snippets"
+    },
+    "languages": {
+      "py": "python",
+      "pyw": "python"
+    }
+  }
+}

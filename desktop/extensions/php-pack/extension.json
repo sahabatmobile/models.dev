@@ -1,0 +1,15 @@
+{
+  "id": "php-pack",
+  "name": "PHP Snippets",
+  "version": "1.0.0",
+  "publisher": "SahabatMobile",
+  "description": "Snippet PHP: function, class, try/catch, foreach, if.",
+  "contributes": {
+    "snippets": {
+      "php": "snippets/php.snippets"
+    },
+    "languages": {
+      "php": "php"
+    }
+  }
+}

@@ -22,6 +22,9 @@
       <button class="act" data-view="api" title="API &amp; Snippet">
         <svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
       </button>
+      <button class="act" data-view="extensions" title="Extensions">
+        <svg viewBox="0 0 24 24"><path d="M10 3h4v3a2 2 0 1 0 4 0h3v4h-3a2 2 0 1 0 0 4h3v4h-4v-3a2 2 0 1 0-4 0v3h-4v-3a2 2 0 1 0-4 0v3H3v-4h3a2 2 0 1 0 0-4H3V6h3a2 2 0 1 0 4 0z"/></svg>
+      </button>
       <div class="act-spacer"></div>
       <button class="act" id="actSettings" title="Pengaturan">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
@@ -85,6 +88,7 @@
         </form>
       </div>
     </aside>
+    <div class="resizer resizer-left" id="resizeLeft" title="Geser panel kiri"></div>
 
     <div class="main">
       <header class="topbar">
@@ -127,6 +131,8 @@
               <div id="termBlocked" class="term-blocked hidden">FTP tidak mendukung terminal. Gunakan koneksi SSH untuk terminal remote.</div>
             </div>
           </div>
+
+          <div class="resizer resizer-agent" id="resizeAgent" title="Geser panel agent"></div>
 
           <div class="ws-agent">
             <div class="pane-head">
@@ -200,6 +206,23 @@
           </div>
         </div>
       </section>
+
+      <section id="view-extensions" class="view hidden">
+        <div class="panel">
+          <h2>Extensions</h2>
+          <p class="muted">Pasang paket snippet &amp; bahasa. Bisa dari katalog bawaan, folder, atau arsip <code>.zip</code> yang berisi <code>extension.json</code>.</p>
+          <div class="field-row">
+            <div class="field grow">
+              <label>Cari ekstensi</label>
+              <input id="extSearch" placeholder="mis. python, php, web" />
+            </div>
+            <button id="extInstallFolder" class="ghost">Install folder</button>
+            <button id="extInstallZip" class="ghost">Install .zip</button>
+            <button id="extOpenDir" class="ghost">Buka folder</button>
+          </div>
+          <div id="extList" class="ext-list"></div>
+        </div>
+      </section>
     </div>
   </div>
 
@@ -212,6 +235,17 @@
       <p class="hint">Key disimpan terenkripsi di perangkat ini. Belum punya? Ambil di halaman API Keys / Plan Details akun SahabatMobile.</p>
       <label>Base URL
         <input id="baseUrlInput" placeholder="https://www.sahabatmobile.com/api/v1" />
+      </label>
+      <label>Tema editor
+        <select id="editorThemeSelect">
+          <option value="tomorrow_night">Tomorrow Night</option>
+          <option value="one_dark">One Dark</option>
+          <option value="monokai">Monokai</option>
+          <option value="dracula">Dracula</option>
+          <option value="nord_dark">Nord Dark</option>
+          <option value="tomorrow_night_blue">Tomorrow Night Blue</option>
+          <option value="tomorrow">Tomorrow Light</option>
+        </select>
       </label>
       <div class="modal-actions">
         <button id="cancelSettings" class="ghost">Batal</button>
@@ -254,6 +288,12 @@
 
   <script src="vendor/ace/ace.js"></script>
   <script src="vendor/ace/theme-tomorrow_night.js"></script>
+  <script src="vendor/ace/theme-one_dark.js"></script>
+  <script src="vendor/ace/theme-monokai.js"></script>
+  <script src="vendor/ace/theme-dracula.js"></script>
+  <script src="vendor/ace/theme-nord_dark.js"></script>
+  <script src="vendor/ace/theme-tomorrow_night_blue.js"></script>
+  <script src="vendor/ace/theme-tomorrow.js"></script>
   <script src="vendor/ace/mode-javascript.js"></script>
   <script src="vendor/ace/mode-typescript.js"></script>
   <script src="vendor/ace/mode-python.js"></script>

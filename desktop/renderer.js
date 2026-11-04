@@ -2,7 +2,8 @@
   'use strict';
 
   const api = window.sahabat;
-  const VIEW_TITLES = { chat: 'Chat', workspace: 'Workspace Developer', models: 'Model', api: 'API & Snippet' };
+  const VIEW_TITLES = { chat: 'Chat', workspace: 'Workspace Developer', models: 'Model', api: 'API & Snippet', extensions: 'Extensions' };
+  const EXT_MODES = {};
   const MODE_MAP = {
     js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
     ts: 'typescript', tsx: 'typescript', py: 'python', html: 'html', htm: 'html',
@@ -80,7 +81,14 @@
     agent: { messages: [], busy: false },
     snippet: 'curl',
     cloneDir: null,
-    clipboard: null
+    clipboard: null,
+    extensions: [],
+    extCatalog: [],
+    extApplied: new Set(),
+    ui: {
+      sideWidth: parseInt(localStorage.getItem('sahabat.sideWidth'), 10) || 252,
+      agentWidth: parseInt(localStorage.getItem('sahabat.agentWidth'), 10) || 344
+    }
   };
 
   const $ = (id) => document.getElementById(id);
@@ -91,7 +99,7 @@
 
   function modeFor(name) {
     const ext = String(name || '').split('.').pop().toLowerCase();
-    return 'ace/mode/' + (MODE_MAP[ext] || 'text');
+    return 'ace/mode/' + (EXT_MODES[ext] || MODE_MAP[ext] || 'text');
   }
 
   function toast(msg) {
@@ -162,6 +170,7 @@
       ensureWorkspace();
     }
     if (view === 'models' && S.settings.hasKey) renderModelList();
+    if (view === 'extensions') renderExtensions();
     setTimeout(() => {
       fitAll();
       try { S.editor && S.editor.resize(true); } catch {}
@@ -571,9 +580,13 @@
     ace.config.set('workerPath', 'vendor/ace');
   }
 
+  function editorThemeName() {
+    return localStorage.getItem('sahabat.editorTheme') || 'tomorrow_night';
+  }
+
   function makeEditor(elId) {
     const editor = ace.edit(elId);
-    editor.setTheme('ace/theme/tomorrow_night');
+    editor.setTheme('ace/theme/' + editorThemeName());
     editor.session.setUseWorker(false);
     editor.setReadOnly(false);
     editor.setOptions({
@@ -762,6 +775,192 @@
       { sep: true },
       { label: 'Save', disabled: !S.active, action: () => saveActive() }
     ]);
+  }
+
+  // ---------- Panel resize ----------
+  function applySideWidth(width, persist) {
+    const max = Math.max(200, Math.min(560, window.innerWidth - 620));
+    const w = Math.max(168, Math.min(width, max));
+    S.ui.sideWidth = w;
+    const panel = $('sidepanel');
+    panel.style.width = w + 'px';
+    panel.style.flex = '0 0 ' + w + 'px';
+    if (persist) localStorage.setItem('sahabat.sideWidth', String(w));
+    try { S.editor && S.editor.resize(true); } catch {}
+  }
+
+  function applyAgentWidth(width, persist) {
+    const max = Math.max(260, window.innerWidth - 380);
+    const w = Math.max(240, Math.min(width, max));
+    S.ui.agentWidth = w;
+    document.documentElement.style.setProperty('--agent-width', w + 'px');
+    if (persist) localStorage.setItem('sahabat.agentWidth', String(w));
+    try { S.editor && S.editor.resize(true); } catch {}
+  }
+
+  function bindResizers() {
+    const attach = (el, onDelta, onReset) => {
+      if (!el) return;
+      el.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        const startX = e.clientX;
+        el.setPointerCapture(e.pointerId);
+        document.body.classList.add('resizing');
+        const move = (ev) => onDelta(ev.clientX - startX);
+        const finish = () => {
+          el.removeEventListener('pointermove', move);
+          el.removeEventListener('pointerup', finish);
+          el.removeEventListener('pointercancel', finish);
+          document.body.classList.remove('resizing');
+        };
+        el.addEventListener('pointermove', move);
+        el.addEventListener('pointerup', finish);
+        el.addEventListener('pointercancel', finish);
+      });
+      el.addEventListener('dblclick', onReset);
+    };
+    attach($('resizeLeft'), (delta) => {
+      const start = S.ui.sideWidth;
+      applySideWidth(start + delta, true);
+    }, () => applySideWidth(252, true));
+    attach($('resizeAgent'), (delta) => {
+      const start = S.ui.agentWidth;
+      applyAgentWidth(start - delta, true);
+    }, () => applyAgentWidth(344, true));
+  }
+
+  // ---------- Extensions ----------
+  function extCard(ext, kind) {
+    const card = document.createElement('div');
+    card.className = 'ext-card';
+    const langs = (ext.contributes && ext.contributes.languages) || {};
+    const badges = Object.keys(langs).slice(0, 8).map((name) => '<span class="ext-badge">.' + esc(name) + '</span>').join('');
+    const snippetScopes = ext.snippets ? Object.keys(ext.snippets) : Object.keys((ext.contributes && ext.contributes.snippets) || {});
+    const main = document.createElement('div');
+    main.className = 'ext-main';
+    main.innerHTML = '<div class="ext-title">' + esc(ext.name) + ' <span class="ext-id">' + esc(ext.id) + '</span></div>'
+      + '<div class="ext-desc">' + esc(ext.description || '') + '</div>'
+      + '<div class="ext-meta">v' + esc(ext.version || '1.0.0') + (ext.publisher ? ' · ' + esc(ext.publisher) : '')
+      + ' · ' + snippetScopes.length + ' set snippet ' + badges + '</div>';
+    const actions = document.createElement('div');
+    actions.className = 'ext-actions';
+    const button = (label, cls, fn) => {
+      const btn = document.createElement('button');
+      btn.className = cls;
+      btn.textContent = label;
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try { await fn(); } finally { btn.disabled = false; }
+      });
+      return btn;
+    };
+    if (kind === 'installed') {
+      actions.appendChild(button(ext.enabled ? 'Disable' : 'Enable', 'ghost small', async () => {
+        const res = await api.extSetEnabled(ext.id, !ext.enabled);
+        if (!res.ok) { toast(res.error || 'Gagal'); return; }
+        await refreshExtensions();
+        toast(ext.enabled ? 'Dinonaktifkan: ' + ext.name : 'Diaktifkan: ' + ext.name);
+      }));
+      actions.appendChild(button('Hapus', 'ghost small danger', async () => {
+        if (!confirm('Hapus ekstensi ' + ext.name + '?')) return;
+        const res = await api.extRemove(ext.id);
+        if (!res.ok) { toast(res.error || 'Gagal menghapus'); return; }
+        await refreshExtensions();
+        toast('Dihapus: ' + ext.name);
+      }));
+      const status = document.createElement('span');
+      status.className = 'ext-status ' + (ext.enabled ? 'on' : 'off');
+      status.textContent = ext.enabled ? 'Aktif' : 'Nonaktif';
+      actions.appendChild(status);
+    } else {
+      actions.appendChild(button('Install', 'primary small', async () => {
+        const res = await api.extInstallBuiltin(ext.id);
+        if (!res.ok) { toast(res.error || 'Gagal install'); return; }
+        await refreshExtensions();
+        toast('Terpasang: ' + ext.name);
+      }));
+    }
+    card.appendChild(main);
+    card.appendChild(actions);
+    return card;
+  }
+
+  function renderExtensions() {
+    const box = $('extList');
+    if (!box) return;
+    box.innerHTML = '';
+    const term = ($('extSearch').value || '').toLowerCase().trim();
+    const match = (ext) => !term || (ext.id + ' ' + (ext.name || '') + ' ' + (ext.description || '')).toLowerCase().includes(term);
+    const installed = S.extensions.filter(match);
+    const available = S.extCatalog.filter((ext) => !ext.installed && match(ext));
+    if (!installed.length && !available.length) {
+      const empty = document.createElement('div');
+      empty.className = 'tree-empty';
+      empty.textContent = S.extCatalog.length ? 'Tidak ada ekstensi yang cocok.' : 'Belum ada ekstensi. Klik Install folder atau Install .zip.';
+      box.appendChild(empty);
+      return;
+    }
+    if (installed.length) {
+      const head = document.createElement('div');
+      head.className = 'ext-group';
+      head.textContent = 'TERPASANG · ' + installed.length;
+      box.appendChild(head);
+      for (const ext of installed) box.appendChild(extCard(ext, 'installed'));
+    }
+    if (available.length) {
+      const head = document.createElement('div');
+      head.className = 'ext-group';
+      head.textContent = 'KATALOG BAWAAN';
+      box.appendChild(head);
+      for (const ext of available) box.appendChild(extCard(ext, 'catalog'));
+    }
+  }
+
+  async function refreshExtensions() {
+    const res = await api.extList();
+    if (!res.ok) { toast(res.error || 'Gagal memuat ekstensi'); return; }
+    S.extensions = res.extensions || [];
+    S.extCatalog = res.catalog || [];
+    renderExtensions();
+    applyExtensions();
+  }
+
+  function applyExtensions() {
+    for (const key of Object.keys(EXT_MODES)) delete EXT_MODES[key];
+    const snippetManager = (ace.require('ace/snippets') || {}).snippetManager;
+    for (const ext of S.extensions) {
+      if (!ext.enabled) continue;
+      const langs = (ext.contributes && ext.contributes.languages) || {};
+      for (const [extName, mode] of Object.entries(langs)) {
+        if (mode) EXT_MODES[extName] = mode;
+      }
+      const stamp = ext.id + '@' + (ext.version || '1');
+      if (S.extApplied.has(stamp)) continue;
+      if (snippetManager && typeof snippetManager.parseSnippetFile === 'function') {
+        for (const [scope, text] of Object.entries(ext.snippets || {})) {
+          try {
+            const parsed = snippetManager.parseSnippetFile(text);
+            if (parsed && parsed.length) snippetManager.register(parsed, scope);
+          } catch {}
+        }
+      }
+      if (ext.contributes && ext.contributes.editorTheme && !localStorage.getItem('sahabat.editorTheme')) {
+        const theme = String(ext.contributes.editorTheme).replace('ace/theme/', '');
+        localStorage.setItem('sahabat.editorTheme', theme);
+        try { S.editor && S.editor.setTheme('ace/theme/' + theme); } catch {}
+      }
+      S.extApplied.add(stamp);
+    }
+    if (S.active) S.editor && S.editor.session.setMode(modeFor(S.active.path));
+  }
+
+  async function installExtension(kind) {
+    const res = kind === 'folder' ? await api.extInstallFolder() : await api.extInstallZip();
+    if (res.canceled) return;
+    if (!res.ok) { toast(res.error || 'Gagal install'); return; }
+    await refreshExtensions();
+    toast('Terpasang: ' + (res.name || res.id) + ' v' + (res.version || ''));
+    switchView('extensions');
   }
 
   // ---------- Terminal ----------
@@ -1111,6 +1310,7 @@
   function openSettings() {
     $('apiKeyInput').value = '';
     $('baseUrlInput').value = S.settings.baseUrl || '';
+    $('editorThemeSelect').value = editorThemeName();
     $('settingsModal').classList.remove('hidden');
     setTimeout(() => $('apiKeyInput').focus(), 50);
   }
@@ -1121,6 +1321,9 @@
     if (key) payload.apiKey = key;
     S.settings = await api.saveSettings(payload);
     updateKeyBadge();
+    const theme = $('editorThemeSelect').value || 'tomorrow_night';
+    localStorage.setItem('sahabat.editorTheme', theme);
+    try { S.editor && S.editor.setTheme('ace/theme/' + theme); } catch {}
     $('settingsModal').classList.add('hidden');
     if (S.settings.hasKey) loadModels();
   }
@@ -1213,6 +1416,15 @@
     document.addEventListener('click', hideContextMenu);
     document.addEventListener('scroll', hideContextMenu, true);
 
+    $('extSearch').addEventListener('input', renderExtensions);
+    $('extInstallFolder').addEventListener('click', () => installExtension('folder'));
+    $('extInstallZip').addEventListener('click', () => installExtension('zip'));
+    $('extOpenDir').addEventListener('click', async () => {
+      const res = await api.extOpenDir();
+      if (!res.ok) toast(res.error || 'Gagal membuka folder ekstensi');
+    });
+    bindResizers();
+
     $('clonePick').addEventListener('click', pickCloneDir);
     $('cloneCancel').addEventListener('click', () => $('cloneModal').classList.add('hidden'));
     $('cloneStart').addEventListener('click', startClone);
@@ -1260,7 +1472,11 @@
     $('copyBase').addEventListener('click', async () => { await api.copyText(S.settings.baseUrl); toast('Base URL disalin'); });
     $('copySnippet').addEventListener('click', async () => { await api.copyText($('snippetCode').textContent); toast('Snippet disalin'); });
 
-    window.addEventListener('resize', fitAll);
+    window.addEventListener('resize', () => {
+      fitAll();
+      applySideWidth(S.ui.sideWidth, false);
+      applyAgentWidth(S.ui.agentWidth, false);
+    });
     document.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
@@ -1293,6 +1509,9 @@
   async function init() {
     aceSetup();
     bind();
+    applySideWidth(S.ui.sideWidth, false);
+    applyAgentWidth(S.ui.agentWidth, false);
+    await refreshExtensions();
     S.settings = await api.getSettings();
     updateKeyBadge();
     renderModelOptions();

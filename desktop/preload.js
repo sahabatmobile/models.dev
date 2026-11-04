@@ -17,6 +17,14 @@ contextBridge.exposeInMainWorld('sahabat', {
   entryCopy: (payload) => ipcRenderer.invoke('entry:copy', payload),
   entryMove: (payload) => ipcRenderer.invoke('entry:move', payload),
 
+  extList: () => ipcRenderer.invoke('ext:list'),
+  extInstallBuiltin: (id) => ipcRenderer.invoke('ext:installBuiltin', id),
+  extInstallFolder: () => ipcRenderer.invoke('ext:installFolder'),
+  extInstallZip: () => ipcRenderer.invoke('ext:installZip'),
+  extRemove: (id) => ipcRenderer.invoke('ext:remove', id),
+  extSetEnabled: (id, enabled) => ipcRenderer.invoke('ext:setEnabled', id, enabled),
+  extOpenDir: () => ipcRenderer.invoke('ext:openDir'),
+
   listModels: () => ipcRenderer.invoke('models:list'),
   startChat: (payload) => ipcRenderer.invoke('chat:start', payload),
   abortChat: (requestId) => ipcRenderer.invoke('chat:abort', requestId),

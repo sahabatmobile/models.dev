@@ -5,6 +5,7 @@ const os = require('os');
 const { spawn } = require('child_process');
 const { Client: SshClient } = require('ssh2');
 const { Client: FtpClient } = require('basic-ftp');
+const AdmZip = require('adm-zip');
 
 const DEFAULT_BASE_URL = 'https://www.sahabatmobile.com/api/v1';
 const IGNORED_DIRS = new Set(['node_modules', '.git', 'dist', 'out', '.next', '.cache', '__pycache__']);
@@ -103,6 +104,205 @@ function errorMessage(status, text) {
   return { status, message: detail || fallback[status] || 'Terjadi kesalahan.', type, code };
 }
 
+// ---------- extensions ----------
+
+function extensionsDir() {
+  return path.join(app.getPath('userData'), 'extensions');
+}
+
+function builtinExtensionsDir() {
+  const builtin = path.basename(__dirname) === 'app.asar' ||
+    __dirname.includes(path.sep + 'app.asar') ||
+    __dirname.includes('/app.asar');
+  if (builtin) {
+    return path.join(process.resourcesPath, 'app.asar.unpacked', 'extensions');
+  }
+  return path.join(__dirname, 'extensions');
+}
+
+function extensionsStateFile() {
+  return path.join(app.getPath('userData'), 'extensions-state.json');
+}
+
+function readExtState() {
+  try {
+    const data = JSON.parse(fs.readFileSync(extensionsStateFile(), 'utf8'));
+    return { disabled: Array.isArray(data.disabled) ? data.disabled : [] };
+  } catch {
+    return { disabled: [] };
+  }
+}
+
+function writeExtState(state) {
+  fs.mkdirSync(path.dirname(extensionsStateFile()), { recursive: true });
+  fs.writeFileSync(extensionsStateFile(), JSON.stringify(state, null, 2), 'utf8');
+}
+
+function safeExtId(value) {
+  const id = String(value || '').trim().replace(/[^a-zA-Z0-9._-]/g, '-');
+  return id || 'extension';
+}
+
+function readExtManifest(dir) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'extension.json'), 'utf8'));
+    if (!manifest || typeof manifest !== 'object') return null;
+    if (!manifest.id || typeof manifest.id !== 'string') manifest.id = safeExtId(path.basename(dir));
+    return manifest;
+  } catch {
+    return null;
+  }
+}
+
+function readExtSnippets(manifest, dir) {
+  const snippets = {};
+  const files = (manifest.contributes && manifest.contributes.snippets) || {};
+  for (const [scope, rel] of Object.entries(files)) {
+    try {
+      snippets[scope] = fs.readFileSync(path.join(dir, rel), 'utf8');
+    } catch {}
+  }
+  return snippets;
+}
+
+function listSubdirs(base) {
+  try {
+    return fs
+      .readdirSync(base, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(base, entry.name));
+  } catch {
+    return [];
+  }
+}
+
+function installExtensionFromDir(srcDir) {
+  const manifest = readExtManifest(srcDir);
+  if (!manifest) throw new Error('extension.json tidak ditemukan atau tidak valid.');
+  const id = safeExtId(manifest.id);
+  const dest = path.join(extensionsDir(), id);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.rmSync(dest, { recursive: true, force: true });
+  fs.cpSync(srcDir, dest, { recursive: true });
+  return { id, name: manifest.name || id, version: manifest.version || '0.0.0' };
+}
+
+async function installExtensionFromZip(zipPath) {
+  const tmp = path.join(os.tmpdir(), 'sahabat-ext-' + Date.now());
+  fs.mkdirSync(tmp, { recursive: true });
+  try {
+    new AdmZip(zipPath).extractAllTo(tmp, true);
+    let root = tmp;
+    if (!fs.existsSync(path.join(root, 'extension.json'))) {
+      const found = listSubdirs(root).find((dir) => fs.existsSync(path.join(dir, 'extension.json')));
+      if (found) root = found;
+    }
+    if (!fs.existsSync(path.join(root, 'extension.json'))) {
+      throw new Error('extension.json tidak ada di dalam arsip.');
+    }
+    return installExtensionFromDir(root);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+ipcMain.handle('ext:list', () => {
+  const state = readExtState();
+  const installed = [];
+  const installedIds = new Set();
+  for (const dir of listSubdirs(extensionsDir())) {
+    const manifest = readExtManifest(dir);
+    if (!manifest) continue;
+    const id = safeExtId(manifest.id);
+    installedIds.add(id);
+    installed.push({
+      ...manifest,
+      id,
+      enabled: !state.disabled.includes(id),
+      snippets: readExtSnippets(manifest, dir)
+    });
+  }
+  const catalog = [];
+  for (const dir of listSubdirs(builtinExtensionsDir())) {
+    const manifest = readExtManifest(dir);
+    if (!manifest) continue;
+    const id = safeExtId(manifest.id);
+    catalog.push({ ...manifest, id, installed: installedIds.has(id) });
+  }
+  return { ok: true, extensions: installed, catalog, dir: extensionsDir() };
+});
+
+ipcMain.handle('ext:installBuiltin', (event, id) => {
+  try {
+    const dir = path.join(builtinExtensionsDir(), safeExtId(id));
+    if (!fs.existsSync(path.join(dir, 'extension.json'))) {
+      throw new Error('Ekstensi bawaan tidak ditemukan.');
+    }
+    return { ok: true, ...installExtensionFromDir(dir) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ext:installFolder', async () => {
+  const result = await dialog.showOpenDialog({
+    title: 'Pilih folder ekstensi',
+    properties: ['openDirectory']
+  });
+  if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
+  try {
+    return { ok: true, ...installExtensionFromDir(result.filePaths[0]) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ext:installZip', async () => {
+  const result = await dialog.showOpenDialog({
+    title: 'Pilih arsip ekstensi',
+    properties: ['openFile'],
+    filters: [{ name: 'Arsip ekstensi', extensions: ['zip'] }]
+  });
+  if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
+  try {
+    return { ok: true, ...(await installExtensionFromZip(result.filePaths[0])) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ext:remove', (event, id) => {
+  try {
+    const key = safeExtId(id);
+    fs.rmSync(path.join(extensionsDir(), key), { recursive: true, force: true });
+    const state = readExtState();
+    state.disabled = state.disabled.filter((item) => item !== key);
+    writeExtState(state);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ext:setEnabled', (event, id, enabled) => {
+  try {
+    const key = safeExtId(id);
+    const state = readExtState();
+    state.disabled = state.disabled.filter((item) => item !== key);
+    if (!enabled) state.disabled.push(key);
+    writeExtState(state);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ext:openDir', async () => {
+  fs.mkdirSync(extensionsDir(), { recursive: true });
+  const err = await shell.openPath(extensionsDir());
+  return err ? { ok: false, error: err } : { ok: true };
+});
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1380,
@@ -143,6 +343,32 @@ function createWindow() {
             out.agentPanel = !!document.querySelector('#agentLog');
             out.activity = document.querySelectorAll('.act').length;
             out.sidepanel = !!document.querySelector('#explorerPane');
+            out.resizerLeft = !!document.querySelector('#resizeLeft');
+            out.resizerAgent = !!document.querySelector('#resizeAgent');
+            out.sideWidth = document.querySelector('#sidepanel').style.width;
+            out.agentWidth = getComputedStyle(document.documentElement).getPropertyValue('--agent-width').trim();
+            document.querySelector('[data-view="extensions"]').click();
+            await new Promise(r => setTimeout(r, 250));
+            out.extView = !document.querySelector('#view-extensions').classList.contains('hidden');
+            out.catalogCards = document.querySelectorAll('#extList .ext-card').length;
+            const beforeExtensions = await window.sahabat.extList();
+            out.catalog = beforeExtensions.catalog.length;
+            const hadPythonPack = beforeExtensions.extensions.some(e => e.id === 'python-pack');
+            if (!hadPythonPack) {
+              const installed = await window.sahabat.extInstallBuiltin('python-pack');
+              const afterInstall = await window.sahabat.extList();
+              const removed = await window.sahabat.extRemove('python-pack');
+              out.installTest = {
+                ok: installed.ok,
+                error: installed.error || '',
+                listed: afterInstall.extensions.some(e => e.id === 'python-pack'),
+                removed: removed.ok
+              };
+            } else {
+              out.installTest = 'already-installed';
+            }
+            document.querySelector('[data-view="workspace"]').click();
+            await new Promise(r => setTimeout(r, 350));
             const ed = ace.edit(document.getElementById('editor'));
             ed.setValue('hello');
             ed.navigateFileEnd();
@@ -161,6 +387,8 @@ function createWindow() {
             out.clipboardApi = typeof window.sahabat.readClipboard;
             out.entryApi = typeof window.sahabat.entryCopy + '/' + typeof window.sahabat.entryMove;
             out.searchbox = typeof ace.require('ace/ext/searchbox');
+            out.snipMod = Object.keys(ace.require('ace/snippets') || {});
+            out.langTools = Object.keys(ace.require('ace/ext/language_tools') || {});
             const tf = ${JSON.stringify(tf)};
             const tgt = { type: 'local', id: null };
             const cp = await window.sahabat.entryCopy({ srcTarget: tgt, srcPath: tf + '\\\\a.txt', dstTarget: tgt, dstDir: tf + '\\\\sub', isDir: false });

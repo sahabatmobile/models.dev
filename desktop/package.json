@@ -17,6 +17,9 @@
     "appId": "com.sahabatmobile.desktop",
     "productName": "SahabatMobile Desktop",
     "icon": "build/icon.png",
+    "asarUnpack": [
+      "extensions/**/*"
+    ],
     "files": [
       "main.js",
       "preload.js",
@@ -24,13 +27,15 @@
       "renderer.js",
       "styles.css",
       "package.json",
+      "extensions/**/*",
       "vendor/**/*",
       "node_modules/ssh2/**/*",
       "node_modules/asn1/**/*",
       "node_modules/bcrypt-pbkdf/**/*",
       "node_modules/tweetnacl/**/*",
       "node_modules/safer-buffer/**/*",
-      "node_modules/basic-ftp/**/*"
+      "node_modules/basic-ftp/**/*",
+      "node_modules/adm-zip/**/*"
     ],
     "directories": {
       "output": "dist"
@@ -56,6 +61,7 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "ace-builds": "^1.45.2",
+    "adm-zip": "^0.6.1",
     "basic-ftp": "^6.2.5",
     "ssh2": "^1.17.0"
   }

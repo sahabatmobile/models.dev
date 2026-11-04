@@ -1,0 +1,27 @@
+snippet fn
+    function ${1:name}(${2:$args}) {
+        ${3}
+    }
+snippet class
+    class ${1:Name} {
+        public function __construct(${2})
+        {
+            ${3}
+        }
+    }
+snippet try
+    try {
+        ${1}
+    } catch (${2:\\Exception} $e) {
+        ${3}
+    }
+snippet foreach
+    foreach (${1:$items} as ${2:$item}) {
+        ${3}
+    }
+snippet if
+    if (${1:condition}) {
+        ${2}
+    }
+snippet pdo
+    $pdo = new PDO(${1:'mysql:host=localhost;dbname=test'}, ${2:'user'}, ${3:'pass'});

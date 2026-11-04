@@ -1,0 +1,28 @@
+snippet html5
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>${1:Document}</title>
+    </head>
+    <body>
+        ${2}
+    </body>
+    </html>
+snippet div
+    <div class="${1}">${2}</div>
+snippet a
+    <a href="${1}">${2}</a>
+snippet img
+    <img src="${1}" alt="${2}" />
+snippet form
+    <form action="${1}" method="${2:post}">
+        ${3}
+    </form>
+snippet input
+    <input type="${1:text}" name="${2}" placeholder="${3}" />
+snippet linkcss
+    <link rel="stylesheet" href="${1:styles.css}" />
+snippet script
+    <script src="${1:app.js}"></script>

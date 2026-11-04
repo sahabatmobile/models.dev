@@ -1,0 +1,18 @@
+{
+  "id": "web-pack",
+  "name": "HTML & CSS Snippets",
+  "version": "1.0.0",
+  "publisher": "SahabatMobile",
+  "description": "Snippet HTML5 dan CSS: boilerplate, div, link, form, flexbox, grid, tombol.",
+  "contributes": {
+    "snippets": {
+      "html": "snippets/html.snippets",
+      "css": "snippets/css.snippets"
+    },
+    "languages": {
+      "html": "html",
+      "htm": "html",
+      "css": "css"
+    }
+  }
+}

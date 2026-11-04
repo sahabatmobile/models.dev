@@ -1,0 +1,18 @@
+{
+  "id": "js-pack",
+  "name": "JavaScript Snippets",
+  "version": "1.0.0",
+  "publisher": "SahabatMobile",
+  "description": "Snippet JavaScript: console.log, function, async, arrow, for..of, try/catch.",
+  "contributes": {
+    "snippets": {
+      "javascript": "snippets/javascript.snippets"
+    },
+    "languages": {
+      "js": "javascript",
+      "mjs": "javascript",
+      "cjs": "javascript",
+      "jsx": "javascript"
+    }
+  }
+}

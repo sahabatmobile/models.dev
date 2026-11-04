@@ -15,7 +15,11 @@ Tahap saat ini: **mode Developer**. Mode UMKM dan 3D Creator disiapkan sebagai t
 ## Workspace Developer
 
 - **Activity bar + Explorer** ala VS Code: Open Folder, Clone Repo, file/folder baru, hapus, dan target explorer
-- **Editor kode** (Ace) dengan tab, pewarnaan sintaks, dan simpan `Ctrl+S`
+- Panel kiri dan panel Agent di kanan bisa **digeser** (double-click handle untuk reset ke ukuran default)
+- **Editor kode** (Ace) dengan tab, pewarnaan sintaks, simpan `Ctrl+S`, cari/ganti `Ctrl+F`, dan ke baris `Ctrl+G`
+- **Context menu Explorer**: copy/cut/paste, rename, move, copy path, new file/folder, delete
+- **Extensions**: pasang paket snippet &amp; bahasa dari katalog bawaan, folder, atau arsip `.zip` (`Settings → Extensions`)
+- Tema editor bisa dipilih di **Pengaturan → Tema editor**
 - **Terminal** lokal (PowerShell) dan terminal SSH
 - **Agent AI** yang bekerja pada explorer **aktif**:
   - Bisa membaca, menulis, dan membuat file
@@ -52,5 +56,6 @@ npx electron-builder --win portable
 - `preload.js` — jembatan IPC
 - `renderer.js` — chat, explorer, editor, agent, koneksi remote
 - `index.html`, `styles.css` — tampilan
+- `extensions/` — katalog ekstensi bawaan (Python, JavaScript, PHP, HTML/CSS)
 - `vendor/` — Ace editor dan xterm.js (offline)
 - `build/icon.png` — ikon aplikasi
