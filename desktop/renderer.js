@@ -1,444 +1,913 @@
-const $ = (id) => document.getElementById(id);
+(() => {
+  'use strict';
 
-const chatEl = $('chat');
-const emptyState = $('emptyState');
-const inputEl = $('input');
-const sendBtn = $('send');
-const stopBtn = $('stop');
-const statusEl = $('status');
-const modelSelect = $('modelSelect');
-const refreshBtn = $('refreshModels');
-const keyBadge = $('keyBadge');
-const tabTitle = $('tabTitle');
-const settingsModal = $('settingsModal');
-const baseUrlInput = $('baseUrlInput');
-const apiKeyInput = $('apiKeyInput');
-const keyHint = $('keyHint');
-const systemInput = $('systemInput');
-const traeModelId = $('traeModelId');
-const traeBaseUrl = $('traeBaseUrl');
-const traeKeyHint = $('traeKeyHint');
-const testResult = $('testResult');
-const snippetBox = $('snippetBox');
-const modelList = $('modelList');
-const modelSearch = $('modelSearch');
+  const api = window.sahabat;
+  const VIEW_TITLES = {
+    chat: 'Chat',
+    workspace: 'Workspace Developer',
+    remote: 'Remote SSH',
+    models: 'Model',
+    api: 'API & Snippet'
+  };
+  const MODE_MAP = {
+    js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
+    ts: 'typescript', tsx: 'typescript', py: 'python', html: 'html', htm: 'html',
+    css: 'css', scss: 'css', less: 'css', json: 'json', md: 'markdown',
+    markdown: 'markdown', sh: 'sh', bash: 'sh', zsh: 'sh', sql: 'sql',
+    xml: 'xml', svg: 'xml', yaml: 'yaml', yml: 'yaml', rs: 'rust', go: 'golang',
+    php: 'php', rb: 'ruby', java: 'java', c: 'c_cpp', h: 'c_cpp', cpp: 'c_cpp',
+    hpp: 'c_cpp', cs: 'csharp', ini: 'ini', conf: 'ini', toml: 'text', txt: 'text'
+  };
+  const TOOLS = [
+    {
+      type: 'function',
+      function: {
+        name: 'list_dir',
+        description: 'Lihat isi sebuah folder di workspace. Path relatif terhadap root workspace.',
+        parameters: { type: 'object', properties: { path: { type: 'string', description: 'Path folder, mis. "." atau "src"' } }, required: ['path'] }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'read_file',
+        description: 'Baca isi file teks di workspace.',
+        parameters: { type: 'object', properties: { path: { type: 'string', description: 'Path file relatif terhadap root' } }, required: ['path'] }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'write_file',
+        description: 'Tulis atau timpa file di workspace dengan isi baru. Gunakan untuk membuat/mengubah kode.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Path file relatif terhadap root' },
+            content: { type: 'string', description: 'Isi file lengkap yang baru' }
+          },
+          required: ['path', 'content']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'run_command',
+        description: 'Jalankan perintah shell di workspace (PowerShell di Windows). Akan dikonfirmasi pengguna.',
+        parameters: {
+          type: 'object',
+          properties: {
+            command: { type: 'string', description: 'Perintah yang akan dijalankan' },
+            cwd: { type: 'string', description: 'Direktori kerja relatif terhadap root, opsional' }
+          },
+          required: ['command']
+        }
+      }
+    }
+  ];
 
-const state = {
-  messages: [],
-  models: [],
-  hasKey: false,
-  baseUrl: 'https://www.sahabatmobile.com/api/v1',
-  busy: false,
-  requestId: null,
-  assistantBubble: null,
-  assistantText: '',
-  snippetKind: 'curl',
-  activeTab: 'chat'
-};
+  const S = {
+    settings: { baseUrl: 'https://www.sahabatmobile.com/api/v1', hasKey: false, keyHint: '' },
+    models: [],
+    model: localStorage.getItem('sahabat.model') || '',
+    view: 'chat',
+    chat: [],
+    busy: false,
+    requestId: null,
+    workspace: { root: null, tree: [] },
+    local: { editor: null, tabs: [], active: null, term: null, fit: null, termId: null, expanded: new Set() },
+    agent: { messages: [], busy: false },
+    ssh: { id: null, dir: null, editor: null, tabs: [], active: null, term: null, fit: null }
+  };
 
-const TAB_TITLES = {
-  chat: 'Chat',
-  trae: 'Integrasi Trae',
-  api: 'API & Snippet',
-  models: 'Model'
-};
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const baseName = (p) => String(p || '').split(/[\\/]/).pop();
+  const dirName = (p) => String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p;
 
-function setStatus(text) {
-  statusEl.textContent = text || '';
-}
-
-function scrollToBottom() {
-  chatEl.scrollTop = chatEl.scrollHeight;
-}
-
-function hideEmpty() {
-  if (emptyState && emptyState.parentNode) emptyState.remove();
-}
-
-function addMessage(role, content) {
-  hideEmpty();
-  const wrap = document.createElement('div');
-  wrap.className = 'message ' + role;
-  const avatar = document.createElement('div');
-  avatar.className = 'avatar';
-  avatar.textContent = role === 'user' ? 'You' : 'AI';
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  bubble.textContent = content || '';
-  wrap.appendChild(avatar);
-  wrap.appendChild(bubble);
-  chatEl.appendChild(wrap);
-  scrollToBottom();
-  return bubble;
-}
-
-function appendToBubble(bubble, text) {
-  bubble.textContent += text;
-  scrollToBottom();
-}
-
-function updateKeyBadge() {
-  keyBadge.textContent = state.hasKey ? 'Key aktif' : 'Key belum diisi';
-  keyBadge.classList.toggle('on', state.hasKey);
-  keyBadge.classList.toggle('off', !state.hasKey);
-  traeKeyHint.textContent = state.hasKey
-    ? 'Tersimpan aman di perangkat ini'
-    : 'Belum ada key. Buka Pengaturan dulu.';
-}
-
-function switchTab(tab) {
-  state.activeTab = tab;
-  tabTitle.textContent = TAB_TITLES[tab] || tab;
-  document.querySelectorAll('.nav-item').forEach((item) => {
-    item.classList.toggle('active', item.dataset.tab === tab);
-  });
-  document.querySelectorAll('.view').forEach((view) => {
-    view.classList.toggle('hidden', view.id !== 'view-' + tab);
-  });
-  if (tab === 'api') renderSnippet();
-  if (tab === 'models') renderModelList();
-}
-
-function currentModel() {
-  return modelSelect.value || '';
-}
-
-function populateModels(models) {
-  state.models = models;
-  modelSelect.innerHTML = '';
-  if (!models.length) {
-    const opt = document.createElement('option');
-    opt.value = '';
-    opt.textContent = 'Tidak ada model';
-    modelSelect.appendChild(opt);
-    updateModelTargets();
-    return;
-  }
-  const saved = localStorage.getItem('sahabat.model');
-  for (const model of models) {
-    const opt = document.createElement('option');
-    opt.value = model.id;
-    opt.textContent = model.name ? model.name + '  (' + model.id + ')' : model.id;
-    modelSelect.appendChild(opt);
-  }
-  if (saved && models.some((m) => m.id === saved)) {
-    modelSelect.value = saved;
-  }
-  updateModelTargets();
-}
-
-function updateModelTargets() {
-  const id = currentModel();
-  traeModelId.textContent = id || '-';
-  if (state.activeTab === 'api') renderSnippet();
-}
-
-async function loadModels() {
-  if (!state.hasKey) return null;
-  setStatus('Memuat model...');
-  const result = await window.sahabat.listModels();
-  if (result.ok) {
-    populateModels(result.models);
-    setStatus(result.models.length + ' model tersedia');
-    return result;
-  }
-  setStatus('Gagal memuat model: ' + (result.error && result.error.message ? result.error.message : ''));
-  return result;
-}
-
-async function refreshSettings() {
-  const settings = await window.sahabat.getSettings();
-  state.hasKey = settings.hasKey;
-  state.baseUrl = settings.baseUrl || state.baseUrl;
-  baseUrlInput.value = state.baseUrl;
-  traeBaseUrl.textContent = state.baseUrl;
-  keyHint.textContent = settings.hasKey ? 'Key tersimpan: ' + settings.keyHint : 'Belum ada API key tersimpan.';
-  apiKeyInput.value = '';
-  updateKeyBadge();
-}
-
-function openSettings() {
-  refreshSettings().then(() => settingsModal.classList.remove('hidden'));
-}
-
-function closeSettings() {
-  settingsModal.classList.add('hidden');
-}
-
-async function saveSettings() {
-  const settings = await window.sahabat.saveSettings({
-    baseUrl: baseUrlInput.value.trim(),
-    apiKey: apiKeyInput.value.trim()
-  });
-  state.hasKey = settings.hasKey;
-  state.baseUrl = settings.baseUrl || state.baseUrl;
-  traeBaseUrl.textContent = state.baseUrl;
-  localStorage.setItem('sahabat.system', systemInput.value.trim());
-  closeSettings();
-  await refreshSettings();
-  if (state.hasKey) await loadModels();
-}
-
-function setBusy(busy) {
-  state.busy = busy;
-  sendBtn.classList.toggle('hidden', busy);
-  stopBtn.classList.toggle('hidden', !busy);
-  inputEl.disabled = busy;
-}
-
-function buildPayloadMessages() {
-  const messages = [];
-  const system = (localStorage.getItem('sahabat.system') || '').trim();
-  if (system) messages.push({ role: 'system', content: system });
-  for (const msg of state.messages) {
-    messages.push({ role: msg.role, content: msg.content });
-  }
-  return messages;
-}
-
-async function sendMessage() {
-  if (state.busy) return;
-  const text = inputEl.value.trim();
-  if (!text) return;
-  if (!state.hasKey) {
-    openSettings();
-    return;
-  }
-  const model = currentModel();
-  if (!model) {
-    setStatus('Pilih model dulu.');
-    return;
+  function modeFor(name) {
+    const ext = String(name || '').split('.').pop().toLowerCase();
+    return 'ace/mode/' + (MODE_MAP[ext] || 'text');
   }
 
-  addMessage('user', text);
-  state.messages.push({ role: 'user', content: text });
-  inputEl.value = '';
-
-  state.assistantText = '';
-  state.requestId = crypto.randomUUID();
-  state.assistantBubble = addMessage('assistant', '');
-  setBusy(true);
-  setStatus('Mengirim...');
-
-  const result = await window.sahabat.startChat({
-    requestId: state.requestId,
-    model,
-    temperature: 0.7,
-    maxTokens: 4096,
-    messages: buildPayloadMessages()
-  });
-
-  if (!result.ok) {
-    const bubble = state.assistantBubble;
-    bubble.classList.add('error');
-    bubble.textContent = result.error ? result.error.message : 'Gagal mengirim pesan.';
-    setBusy(false);
-    state.requestId = null;
-    setStatus('');
+  function aceSetup() {
+    ace.config.set('basePath', 'vendor/ace');
+    ace.config.set('modePath', 'vendor/ace');
+    ace.config.set('themePath', 'vendor/ace');
+    ace.config.set('workerPath', 'vendor/ace');
   }
-}
 
-function stopMessage() {
-  if (state.requestId) {
-    window.sahabat.abortChat(state.requestId);
-    setStatus('Menghentikan...');
+  function makeEditor(elId) {
+    const editor = ace.edit(elId);
+    editor.setTheme('ace/theme/tomorrow_night');
+    editor.session.setUseWorker(false);
+    editor.setOptions({
+      fontSize: '13px',
+      fontFamily: 'Consolas, ui-monospace, monospace',
+      showPrintMargin: false,
+      useSoftTabs: true,
+      tabSize: 2,
+      wrap: false,
+      highlightActiveLine: true
+    });
+    return editor;
   }
-}
 
-function renderSnippet() {
-  const base = state.baseUrl;
-  const model = currentModel() || 'MiniMax-M3';
-  const key = 'sk-sm-YOUR_KEY_HERE';
-  let text = '';
-  if (state.snippetKind === 'curl') {
-    text = 'curl ' + base + '/chat/completions \\\n' +
-      '  -H "Authorization: Bearer ' + key + '" \\\n' +
-      '  -H "Content-Type: application/json" \\\n' +
-      "  -d '{\n" +
-      '    "model": "' + model + '",\n' +
-      '    "messages": [{"role":"user","content":"Halo!"}],\n' +
-      '    "stream": false\n' +
-      "  }'";
-  } else if (state.snippetKind === 'python') {
-    text = 'from openai import OpenAI\n\n' +
-      'client = OpenAI(\n' +
-      '    base_url="' + base + '",\n' +
-      '    api_key="' + key + '",\n' +
-      ')\n\n' +
-      'resp = client.chat.completions.create(\n' +
-      '    model="' + model + '",\n' +
-      '    messages=[{"role": "user", "content": "Halo!"}],\n' +
-      ')\n' +
-      'print(resp.choices[0].message.content)';
-  } else if (state.snippetKind === 'node') {
-    text = 'import OpenAI from "openai";\n\n' +
-      'const client = new OpenAI({\n' +
-      '  baseURL: "' + base + '",\n' +
-      '  apiKey: "' + key + '",\n' +
-      '});\n\n' +
-      'const resp = await client.chat.completions.create({\n' +
-      '  model: "' + model + '",\n' +
-      '  messages: [{ role: "user", content: "Halo!" }],\n' +
-      '});\n' +
-      'console.log(resp.choices[0].message.content);';
-  } else {
-    text = '{\n' +
-      '  "$schema": "https://opencode.ai/config.json",\n' +
-      '  "provider": {\n' +
-      '    "sahabatmobile": {\n' +
-      '      "npm": "@ai-sdk/openai-compatible",\n' +
-      '      "name": "SahabatMobile",\n' +
-      '      "options": { "baseURL": "' + base + '" },\n' +
-      '      "models": { "' + model + '": { "name": "' + model + '" } }\n' +
-      '    }\n' +
-      '  }\n' +
-      '}';
+  function toast(msg) {
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 2600);
   }
-  snippetBox.textContent = text;
-}
 
-function renderModelList() {
-  const query = modelSearch.value.trim().toLowerCase();
-  modelList.innerHTML = '';
-  const filtered = state.models.filter((m) =>
-    !query || m.id.toLowerCase().includes(query) || (m.name || '').toLowerCase().includes(query)
-  );
-  if (!filtered.length) {
-    const empty = document.createElement('p');
-    empty.className = 'muted';
-    empty.textContent = state.hasKey ? 'Tidak ada model yang cocok.' : 'Isi API key dulu untuk memuat model.';
-    modelList.appendChild(empty);
-    return;
+  function updateKeyBadge() {
+    const badge = $('keyBadge');
+    if (S.settings.hasKey) {
+      badge.textContent = 'Key •••• ' + (S.settings.keyHint || '');
+      badge.className = 'badge on';
+    } else {
+      badge.textContent = 'Key belum diisi';
+      badge.className = 'badge off';
+    }
   }
-  for (const model of filtered) {
-    const row = document.createElement('div');
-    row.className = 'model-row';
-    const info = document.createElement('div');
-    info.className = 'model-info';
-    const name = document.createElement('div');
-    name.className = 'model-name';
-    name.textContent = model.name || model.id;
-    const id = document.createElement('div');
-    id.className = 'model-id';
-    id.textContent = model.id;
-    info.appendChild(name);
-    info.appendChild(id);
-    const copy = document.createElement('button');
-    copy.className = 'ghost small';
-    copy.textContent = 'Salin ID';
-    copy.addEventListener('click', () => copyWithFeedback(copy, model.id, 'Salin ID'));
-    row.appendChild(info);
-    row.appendChild(copy);
-    modelList.appendChild(row);
+
+  function setStatus(text) {
+    $('chatStatus').textContent = text || '';
   }
-}
 
-async function copyWithFeedback(button, text, original) {
-  await window.sahabat.copyText(text);
-  button.textContent = 'Tersalin';
-  setTimeout(() => {
-    button.textContent = original;
-  }, 1200);
-}
-
-async function testConnection() {
-  testResult.textContent = 'Menguji...';
-  const result = await window.sahabat.listModels();
-  if (result.ok) {
-    testResult.textContent = 'Berhasil · ' + result.models.length + ' model';
-    populateModels(result.models);
-  } else {
-    testResult.textContent = 'Gagal · ' + (result.error && result.error.message ? result.error.message : 'tidak diketahui');
+  function currentModel() {
+    return S.model || (S.models[0] && S.models[0].id) || 'MiniMax-M3';
   }
-}
 
-window.sahabat.onChunk((data) => {
-  if (data.requestId !== state.requestId) return;
-  state.assistantText += data.delta;
-  if (state.assistantBubble) appendToBubble(state.assistantBubble, data.delta);
-  setStatus('Mengetik...');
-});
-
-window.sahabat.onDone((data) => {
-  if (data.requestId !== state.requestId) return;
-  if (state.assistantText) {
-    state.messages.push({ role: 'assistant', content: state.assistantText });
-  }
-  setBusy(false);
-  state.requestId = null;
-  state.assistantBubble = null;
-  const tokens = data.usage && data.usage.total_tokens;
-  setStatus(data.aborted ? 'Dihentikan' : tokens ? 'Selesai · ' + tokens + ' token' : 'Selesai');
-});
-
-window.sahabat.onError((data) => {
-  if (data.requestId !== state.requestId) return;
-  if (state.assistantBubble) {
-    state.assistantBubble.classList.add('error');
-    state.assistantBubble.textContent = data.message || 'Terjadi kesalahan.';
-  }
-  setBusy(false);
-  state.requestId = null;
-  setStatus('');
-});
-
-document.querySelectorAll('.nav-item').forEach((item) => {
-  item.addEventListener('click', () => switchTab(item.dataset.tab));
-});
-
-document.querySelectorAll('[data-copy]').forEach((button) => {
-  button.addEventListener('click', () => {
-    const target = $(button.dataset.copy);
-    if (target) copyWithFeedback(button, target.textContent, 'Salin');
-  });
-});
-
-document.querySelectorAll('#snippetTabs .chip').forEach((chip) => {
-  chip.addEventListener('click', () => {
-    state.snippetKind = chip.dataset.snippet;
-    document.querySelectorAll('#snippetTabs .chip').forEach((c) => c.classList.toggle('active', c === chip));
+  function setModel(id) {
+    if (!id) return;
+    S.model = id;
+    localStorage.setItem('sahabat.model', id);
+    const sel = $('modelSelect');
+    if ([...sel.options].some((o) => o.value === id)) sel.value = id;
+    $('apiModel').textContent = id;
     renderSnippet();
-  });
-});
-
-sendBtn.addEventListener('click', sendMessage);
-stopBtn.addEventListener('click', stopMessage);
-refreshBtn.addEventListener('click', loadModels);
-$('openSettings').addEventListener('click', openSettings);
-$('cancelSettings').addEventListener('click', closeSettings);
-$('saveSettings').addEventListener('click', saveSettings);
-$('copyKeyBtn').addEventListener('click', async () => {
-  const result = await window.sahabat.copyKey();
-  const button = $('copyKeyBtn');
-  button.textContent = result.ok ? 'Tersalin' : 'Key kosong';
-  setTimeout(() => {
-    button.textContent = 'Salin key';
-  }, 1200);
-});
-$('testConnBtn').addEventListener('click', testConnection);
-$('copySnippetBtn').addEventListener('click', () => copyWithFeedback($('copySnippetBtn'), snippetBox.textContent, 'Salin snippet'));
-
-modelSelect.addEventListener('change', () => {
-  localStorage.setItem('sahabat.model', modelSelect.value);
-  updateModelTargets();
-});
-
-modelSearch.addEventListener('input', renderModelList);
-
-inputEl.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.shiftKey) {
-    event.preventDefault();
-    sendMessage();
   }
-});
 
-window.addEventListener('DOMContentLoaded', async () => {
-  systemInput.value = localStorage.getItem('sahabat.system') || '';
-  await refreshSettings();
-  switchTab('chat');
-  if (state.hasKey) {
-    await loadModels();
-  } else {
-    openSettings();
+  function renderModelOptions() {
+    const sel = $('modelSelect');
+    sel.innerHTML = '';
+    if (!S.models.length) {
+      const opt = document.createElement('option');
+      opt.value = currentModel();
+      opt.textContent = currentModel();
+      sel.appendChild(opt);
+    } else {
+      for (const m of S.models) {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.id;
+        sel.appendChild(opt);
+      }
+      if (!S.models.some((m) => m.id === S.model)) S.model = S.models[0].id;
+      sel.value = S.model;
+    }
+    $('apiModel').textContent = currentModel();
+    renderSnippet();
   }
-});
+
+  // ---------- Views ----------
+  function switchView(view) {
+    S.view = view;
+    document.querySelectorAll('.nav-item').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
+    document.querySelectorAll('.view').forEach((v) => v.classList.add('hidden'));
+    const target = $('view-' + view);
+    if (target) target.classList.remove('hidden');
+    $('viewTitle').textContent = VIEW_TITLES[view] || view;
+    if (view === 'workspace') ensureLocalWorkspace();
+    if (view === 'remote') ensureRemoteEditor();
+    if (view === 'models' && S.settings.hasKey) renderModelList();
+    setTimeout(() => {
+      fitAll();
+      try { S.local.editor && S.local.editor.resize(true); } catch {}
+      try { S.ssh.editor && S.ssh.editor.resize(true); } catch {}
+    }, 80);
+  }
+
+  // ---------- Chat ----------
+  function chatAdd(role, text) {
+    const empty = $('chat').querySelector('.empty');
+    if (empty) empty.remove();
+    const row = document.createElement('div');
+    row.className = 'message ' + role;
+    row.innerHTML = '<div class="avatar">' + (role === 'user' ? 'You' : role === 'error' ? '!' : 'AI') + '</div><div class="bubble"></div>';
+    row.querySelector('.bubble').textContent = text;
+    $('chat').appendChild(row);
+    $('chat').scrollTop = $('chat').scrollHeight;
+    return row.querySelector('.bubble');
+  }
+
+  async function sendChat() {
+    const input = $('chatInput');
+    const text = input.value.trim();
+    if (!text || S.busy) return;
+    if (!S.settings.hasKey) { openSettings(); return; }
+    input.value = '';
+    S.busy = true;
+    $('sendChat').classList.add('hidden');
+    $('stopChat').classList.remove('hidden');
+    setStatus('Menghubungi model...');
+    S.chat.push({ role: 'user', content: text });
+    chatAdd('user', text);
+    const bubble = chatAdd('assistant', '');
+    const requestId = 'req-' + Date.now();
+    S.requestId = requestId;
+    let full = '';
+    const offChunk = api.onChunk((d) => {
+      if (d.requestId !== requestId) return;
+      full += d.delta || '';
+      bubble.textContent = full;
+      $('chat').scrollTop = $('chat').scrollHeight;
+      setStatus('Mengetik...');
+    });
+    const offDone = api.onDone((d) => {
+      if (d.requestId !== requestId) return;
+      cleanup();
+      if (d.aborted) {
+        setStatus('Dihentikan');
+      } else {
+        S.chat.push({ role: 'assistant', content: full });
+        setStatus('');
+      }
+    });
+    const offErr = api.onError((d) => {
+      if (d.requestId !== requestId) return;
+      cleanup();
+      bubble.parentElement.classList.add('error');
+      bubble.textContent = d.message || 'Terjadi kesalahan.';
+      setStatus('');
+    });
+    function cleanup() {
+      offChunk(); offDone(); offErr();
+      S.busy = false;
+      S.requestId = null;
+      $('sendChat').classList.remove('hidden');
+      $('stopChat').classList.add('hidden');
+    }
+    const res = await api.startChat({
+      requestId,
+      model: currentModel(),
+      messages: S.chat.slice(-20)
+    });
+    if (!res.ok) {
+      cleanup();
+      bubble.parentElement.classList.add('error');
+      bubble.textContent = (res.error && res.error.message) || 'Gagal mengirim.';
+      setStatus('');
+    }
+  }
+
+  // ---------- Workspace: tree ----------
+  function renderTree(container, nodes, depth) {
+    container.innerHTML = '';
+    for (const node of nodes) {
+      const row = document.createElement('div');
+      row.className = 'tree-row';
+      row.style.paddingLeft = 6 + depth * 14 + 'px';
+      row.dataset.path = node.path;
+      if (node.dir) {
+        const open = S.local.expanded.has(node.path);
+        row.innerHTML = '<span class="caret">' + (open ? '▾' : '▸') + '</span><span class="fname">' + esc(node.name) + '</span>';
+        row.addEventListener('click', () => {
+          if (S.local.expanded.has(node.path)) S.local.expanded.delete(node.path);
+          else S.local.expanded.add(node.path);
+          renderTree(container, nodes, depth);
+        });
+        container.appendChild(row);
+        if (open) renderTree(container, node.children || [], depth + 1);
+      } else {
+        row.innerHTML = '<span class="caret">·</span><span class="fname">' + esc(node.name) + '</span>';
+        row.addEventListener('click', () => openLocalFile(node.path));
+        container.appendChild(row);
+      }
+    }
+  }
+
+  function loadWorkspaceTree(tree) {
+    S.workspace.tree = tree || [];
+    renderTree($('fileTree'), S.workspace.tree, 0);
+  }
+
+  async function ensureLocalWorkspace() {
+    if (!S.local.editor) {
+      S.local.editor = makeEditor('editor');
+      S.local.editor.commands.addCommand({
+        name: 'save',
+        bindKey: { win: 'Ctrl-S', mac: 'Cmd-S' },
+        exec: () => saveActiveLocal()
+      });
+    }
+    initLocalTerminal();
+    if (!S.workspace.root) {
+      const info = await api.workspaceInfo();
+      if (info.ok) {
+        S.workspace.root = info.root;
+        $('wsRoot').textContent = info.root;
+        loadWorkspaceTree(info.tree);
+      }
+    } else {
+      const info = await api.workspaceTree();
+      if (info.ok) loadWorkspaceTree(info.tree);
+    }
+    setTimeout(() => { try { S.local.fit && S.local.fit.fit(); } catch {} }, 80);
+  }
+
+  async function openFolder() {
+    const res = await api.openFolder();
+    if (!res.ok) return;
+    S.workspace.root = res.root;
+    S.local.expanded.clear();
+    $('wsRoot').textContent = res.root;
+    loadWorkspaceTree(res.tree);
+    if (S.local.termId) {
+      api.stopTerminal(S.local.termId);
+      S.local.termId = null;
+    }
+    startLocalTerminal(res.root);
+    toast('Folder dibuka: ' + dirName(res.root));
+  }
+
+  function renderLocalTabs() {
+    const bar = $('tabbar');
+    bar.innerHTML = '';
+    for (const tab of S.local.tabs) {
+      const el = document.createElement('div');
+      el.className = 'tab' + (tab === S.local.active ? ' active' : '');
+      el.innerHTML = '<span class="tab-name">' + esc(tab.name) + (tab.dirty ? ' •' : '') + '</span><span class="tab-close">×</span>';
+      el.addEventListener('click', (e) => {
+        if (e.target.classList.contains('tab-close')) { closeLocalTab(tab); return; }
+        activateLocalTab(tab);
+      });
+      bar.appendChild(el);
+    }
+  }
+
+  function activateLocalTab(tab) {
+    S.local.active = tab;
+    S.local.editor.setSession(tab.session);
+    renderLocalTabs();
+  }
+
+  async function openLocalFile(filePath) {
+    const existing = S.local.tabs.find((t) => t.path === filePath);
+    if (existing) { activateLocalTab(existing); return; }
+    const res = await api.readFile(filePath);
+    if (!res.ok) { toast(res.error || 'Gagal membuka file'); return; }
+    const session = ace.createEditSession(res.content);
+    session.setMode(modeFor(filePath));
+    session.setUseWorker(false);
+    const tab = { path: res.path, name: baseName(res.path), session, dirty: false };
+    session.on('change', () => {
+      if (!tab.dirty) { tab.dirty = true; renderLocalTabs(); }
+    });
+    S.local.tabs.push(tab);
+    activateLocalTab(tab);
+  }
+
+  function closeLocalTab(tab) {
+    if (tab.dirty && !confirm('File "' + tab.name + '" belum disimpan. Tutup saja?')) return;
+    const idx = S.local.tabs.indexOf(tab);
+    S.local.tabs.splice(idx, 1);
+    if (S.local.active === tab) {
+      const next = S.local.tabs[Math.max(0, idx - 1)];
+      S.local.active = next || null;
+      if (next) S.local.editor.setSession(next.session);
+      else S.local.editor.setSession(ace.createEditSession(''));
+    }
+    renderLocalTabs();
+  }
+
+  async function saveActiveLocal() {
+    const tab = S.local.active;
+    if (!tab) return;
+    const res = await api.writeFile(tab.path, S.local.editor.getValue());
+    if (!res.ok) { toast(res.error || 'Gagal menyimpan'); return; }
+    tab.dirty = false;
+    renderLocalTabs();
+    const info = await api.workspaceTree();
+    if (info.ok) loadWorkspaceTree(info.tree);
+    toast('Tersimpan: ' + tab.name);
+  }
+
+  // ---------- Workspace: terminal ----------
+  function initLocalTerminal() {
+    if (S.local.term) return;
+    const term = new Terminal({
+      fontSize: 12,
+      fontFamily: 'Consolas, ui-monospace, monospace',
+      cursorBlink: true,
+      convertEol: true,
+      theme: { background: '#0b0e13', foreground: '#e6e9ef', cursor: '#3b82f6', selectionBackground: '#264f78' }
+    });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open($('termLocal'));
+    try { fit.fit(); } catch {}
+    term.onData((d) => { if (S.local.termId) api.terminalInput(S.local.termId, d); });
+    S.local.term = term;
+    S.local.fit = fit;
+    startLocalTerminal(S.workspace.root);
+  }
+
+  async function startLocalTerminal(cwd) {
+    if (S.local.termId) return;
+    const res = await api.startTerminal({ cwd: cwd || undefined });
+    if (!res.ok) {
+      S.local.term && S.local.term.writeln('\r\n[gagal memulai terminal] ' + (res.error || ''));
+      return;
+    }
+    S.local.termId = res.id;
+    S.local.term && S.local.term.writeln('SahabatMobile terminal — ' + (res.shell || 'shell'));
+  }
+
+  // ---------- Agent ----------
+  function agentLog(html, cls) {
+    const el = document.createElement('div');
+    el.className = 'agent-item ' + (cls || '');
+    el.innerHTML = html;
+    $('agentLog').appendChild(el);
+    $('agentLog').scrollTop = $('agentLog').scrollHeight;
+    return el;
+  }
+
+  function agentSystemPrompt() {
+    return [
+      'Anda adalah agen coding di dalam aplikasi SahabatMobile Desktop.',
+      'Workspace root: ' + (S.workspace.root || '(belum dibuka)'),
+      'Gunakan tools untuk membaca/menulis file dan menjalankan perintah.',
+      'Selalu pakai path relatif terhadap workspace root. Jangan menulis di luar root.',
+      'Kerjakan tugas langkah demi langkah, lalu jelaskan hasil akhir secara singkat dalam Bahasa Indonesia.'
+    ].join('\n');
+  }
+
+  async function execTool(name, args) {
+    if (name === 'list_dir') return api.agentListDir(args.path || '.');
+    if (name === 'read_file') return api.agentReadFile(args.path);
+    if (name === 'write_file') return api.agentWriteFile(args.path, args.content ?? '');
+    if (name === 'run_command') return api.agentRunCommand(args.command, args.cwd, 120000);
+    return { ok: false, error: 'Tool tidak dikenal: ' + name };
+  }
+
+  async function sendAgent() {
+    const input = $('agentInput');
+    const text = input.value.trim();
+    if (!text || S.agent.busy) return;
+    if (!S.settings.hasKey) { openSettings(); return; }
+    if (!S.workspace.root) { toast('Buka folder kerja dulu.'); return; }
+    input.value = '';
+    S.agent.busy = true;
+    $('agentSend').classList.add('hidden');
+    $('agentStatus').textContent = 'Bekerja...';
+    S.agent.messages.push({ role: 'user', content: text });
+    agentLog('<div class="agent-user">' + esc(text) + '</div>', 'user');
+
+    const messages = [{ role: 'system', content: agentSystemPrompt() }, ...S.agent.messages];
+    let loops = 0;
+    let wrote = false;
+    while (loops < 8) {
+      loops += 1;
+      const res = await api.completeChat({ model: currentModel(), messages, tools: TOOLS, maxTokens: 4096 });
+      if (!res.ok) {
+        agentLog('<div class="agent-error">' + esc((res.error && res.error.message) || 'Gagal memanggil model.') + '</div>', 'error');
+        break;
+      }
+      const msg = res.message || {};
+      messages.push(msg);
+      S.agent.messages.push(msg);
+      if (msg.content && String(msg.content).trim()) {
+        agentLog('<div class="agent-ai">' + esc(msg.content) + '</div>', 'ai');
+      }
+      const calls = msg.tool_calls || [];
+      if (!calls.length) break;
+      for (const call of calls) {
+        const fn = (call.function && call.function.name) || '';
+        let args = {};
+        try { args = JSON.parse((call.function && call.function.arguments) || '{}'); } catch {}
+        agentLog('<div class="agent-tool"><span class="tool-name">' + esc(fn) + '</span> <span class="tool-args">' + esc(JSON.stringify(args)) + '</span></div>', 'tool');
+        const result = await execTool(fn, args);
+        const output = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+        messages.push({ role: 'tool', tool_call_id: call.id, content: output });
+        S.agent.messages.push({ role: 'tool', tool_call_id: call.id, content: output });
+        agentLog('<details class="agent-result"><summary>' + esc(fn) + ' selesai</summary><pre>' + esc(output.slice(0, 4000)) + '</pre></details>', 'result');
+        if (fn === 'write_file') wrote = true;
+      }
+      if (wrote) {
+        wrote = false;
+        const info = await api.workspaceTree();
+        if (info.ok) loadWorkspaceTree(info.tree);
+      }
+    }
+    S.agent.busy = false;
+    $('agentSend').classList.remove('hidden');
+    $('agentStatus').textContent = '';
+    const info = await api.workspaceTree();
+    if (info.ok) loadWorkspaceTree(info.tree);
+  }
+
+  // ---------- Remote SSH ----------
+  function ensureRemoteEditor() {
+    if (!S.ssh.editor) {
+      S.ssh.editor = makeEditor('reditor');
+      S.ssh.editor.commands.addCommand({
+        name: 'save',
+        bindKey: { win: 'Ctrl-S', mac: 'Cmd-S' },
+        exec: () => saveActiveRemote()
+      });
+    }
+    if (!S.ssh.term) {
+      const term = new Terminal({
+        fontSize: 12,
+        fontFamily: 'Consolas, ui-monospace, monospace',
+        cursorBlink: true,
+        theme: { background: '#0b0e13', foreground: '#e6e9ef', cursor: '#3b82f6', selectionBackground: '#264f78' }
+      });
+      const fit = new FitAddon.FitAddon();
+      term.loadAddon(fit);
+      term.open($('sshTerm'));
+      try { fit.fit(); } catch {}
+      term.onData((d) => { if (S.ssh.id) api.sshInput(S.ssh.id, d); });
+      S.ssh.term = term;
+      S.ssh.fit = fit;
+    }
+    setTimeout(() => { try { S.ssh.fit && S.ssh.fit.fit(); } catch {} }, 60);
+  }
+
+  function renderRemoteList(items, dir) {
+    const box = $('sshTree');
+    box.innerHTML = '';
+    if (dir !== '/') {
+      const up = document.createElement('div');
+      up.className = 'tree-row';
+      up.innerHTML = '<span class="caret">↑</span><span class="fname">..</span>';
+      up.addEventListener('click', () => loadRemoteDir(dir.replace(/\/+[^/]+\/?$/, '') || '/'));
+      box.appendChild(up);
+    }
+    for (const item of items) {
+      const row = document.createElement('div');
+      row.className = 'tree-row';
+      row.innerHTML = '<span class="caret">' + (item.dir ? '▸' : '·') + '</span><span class="fname">' + esc(item.name) + '</span>';
+      row.addEventListener('click', () => {
+        if (item.dir) loadRemoteDir(item.path);
+        else openRemoteFile(item.path);
+      });
+      box.appendChild(row);
+    }
+  }
+
+  async function loadRemoteDir(dir) {
+    if (!S.ssh.id) return;
+    const res = await api.sshListDir(S.ssh.id, dir);
+    if (!res.ok) { toast(res.error || 'Gagal membaca folder remote'); return; }
+    S.ssh.dir = res.dir;
+    $('sshRoot').textContent = res.dir;
+    renderRemoteList(res.items, res.dir);
+  }
+
+  function renderRemoteTabs() {
+    const bar = $('rtabbar');
+    bar.innerHTML = '';
+    for (const tab of S.ssh.tabs) {
+      const el = document.createElement('div');
+      el.className = 'tab' + (tab === S.ssh.active ? ' active' : '');
+      el.innerHTML = '<span class="tab-name">' + esc(tab.name) + (tab.dirty ? ' •' : '') + '</span><span class="tab-close">×</span>';
+      el.addEventListener('click', (e) => {
+        if (e.target.classList.contains('tab-close')) { closeRemoteTab(tab); return; }
+        S.ssh.active = tab;
+        S.ssh.editor.setSession(tab.session);
+        renderRemoteTabs();
+      });
+      bar.appendChild(el);
+    }
+  }
+
+  async function openRemoteFile(filePath) {
+    if (!S.ssh.id) return;
+    const existing = S.ssh.tabs.find((t) => t.path === filePath);
+    if (existing) {
+      S.ssh.active = existing;
+      S.ssh.editor.setSession(existing.session);
+      renderRemoteTabs();
+      return;
+    }
+    const res = await api.sshReadFile(S.ssh.id, filePath);
+    if (!res.ok) { toast(res.error || 'Gagal membuka file remote'); return; }
+    const session = ace.createEditSession(res.content);
+    session.setMode(modeFor(filePath));
+    session.setUseWorker(false);
+    const tab = { path: filePath, name: baseName(filePath), session, dirty: false };
+    session.on('change', () => { if (!tab.dirty) { tab.dirty = true; renderRemoteTabs(); } });
+    S.ssh.tabs.push(tab);
+    S.ssh.active = tab;
+    S.ssh.editor.setSession(session);
+    renderRemoteTabs();
+  }
+
+  function closeRemoteTab(tab) {
+    if (tab.dirty && !confirm('File "' + tab.name + '" belum disimpan. Tutup saja?')) return;
+    const idx = S.ssh.tabs.indexOf(tab);
+    S.ssh.tabs.splice(idx, 1);
+    if (S.ssh.active === tab) {
+      const next = S.ssh.tabs[Math.max(0, idx - 1)];
+      S.ssh.active = next || null;
+      if (next) S.ssh.editor.setSession(next.session);
+      else S.ssh.editor.setSession(ace.createEditSession(''));
+    }
+    renderRemoteTabs();
+  }
+
+  async function saveActiveRemote() {
+    const tab = S.ssh.active;
+    if (!tab || !S.ssh.id) return;
+    const res = await api.sshWriteFile(S.ssh.id, tab.path, S.ssh.editor.getValue());
+    if (!res.ok) { toast(res.error || 'Gagal menyimpan remote'); return; }
+    tab.dirty = false;
+    renderRemoteTabs();
+    toast('Tersimpan: ' + tab.name);
+  }
+
+  async function connectSsh(e) {
+    e.preventDefault();
+    const host = $('sshHost').value.trim();
+    const username = $('sshUser').value.trim();
+    if (!host || !username) return;
+    const btn = $('sshConnect');
+    btn.disabled = true;
+    btn.textContent = 'Menghubungkan...';
+    const res = await api.sshConnect({
+      host,
+      port: Number($('sshPort').value) || 22,
+      username,
+      authType: $('sshAuth').value,
+      password: $('sshPassword').value,
+      privateKey: $('sshKey').value,
+      passphrase: $('sshPassphrase') ? $('sshPassphrase').value : ''
+    });
+    btn.disabled = false;
+    btn.textContent = 'Hubungkan';
+    if (!res.ok) { toast('SSH gagal: ' + (res.error || 'unknown')); return; }
+    S.ssh.id = res.id;
+    S.ssh.tabs = [];
+    S.ssh.active = null;
+    $('sshDisconnect').classList.remove('hidden');
+    $('sshRoot').textContent = res.home;
+    ensureRemoteEditor();
+    S.ssh.term.reset();
+    S.ssh.term.writeln('Terhubung ke ' + username + '@' + host + ':' + (Number($('sshPort').value) || 22));
+    const shell = await api.sshShell(res.id, S.ssh.term.cols, S.ssh.term.rows);
+    if (!shell.ok) toast('Shell gagal: ' + (shell.error || ''));
+    loadRemoteDir(res.home);
+    toast('SSH terhubung');
+  }
+
+  async function disconnectSsh() {
+    if (!S.ssh.id) return;
+    await api.sshDisconnect(S.ssh.id);
+    S.ssh.id = null;
+    $('sshDisconnect').classList.add('hidden');
+    $('sshRoot').textContent = 'Belum terhubung';
+    $('sshTree').innerHTML = '';
+    $('rtabbar').innerHTML = '';
+    S.ssh.tabs = [];
+    if (S.ssh.term) S.ssh.term.writeln('\r\n[koneksi diputus]');
+  }
+
+  // ---------- Models & snippets ----------
+  function renderModelList() {
+    const q = ($('modelSearch').value || '').toLowerCase();
+    const list = S.models.filter((m) => !q || m.id.toLowerCase().includes(q) || (m.name || '').toLowerCase().includes(q));
+    const box = $('modelList');
+    box.innerHTML = '';
+    if (!list.length) {
+      box.innerHTML = '<p class="muted">' + (S.settings.hasKey ? 'Tidak ada model yang cocok.' : 'Isi API key dulu untuk memuat model.') + '</p>';
+      return;
+    }
+    for (const m of list) {
+      const row = document.createElement('div');
+      row.className = 'model-row';
+      row.innerHTML =
+        '<div class="model-info"><div class="model-name">' + esc(m.name || m.id) + '</div>' +
+        '<div class="model-id">' + esc(m.id) + (m.owner ? ' · ' + esc(m.owner) : '') + '</div></div>' +
+        '<div class="model-actions"><button class="ghost small use">Pakai</button><button class="ghost small copy">Salin</button></div>';
+      row.querySelector('.use').addEventListener('click', () => { setModel(m.id); toast('Model aktif: ' + m.id); });
+      row.querySelector('.copy').addEventListener('click', async () => { await api.copyText(m.id); toast('ID disalin'); });
+      box.appendChild(row);
+    }
+  }
+
+  async function loadModels() {
+    const res = await api.listModels();
+    if (!res.ok) {
+      S.models = [];
+      renderModelOptions();
+      renderModelList();
+      if (S.settings.hasKey) toast((res.error && res.error.message) || 'Gagal memuat model');
+      return;
+    }
+    S.models = res.models || [];
+    renderModelOptions();
+    renderModelList();
+  }
+
+  function renderSnippet() {
+    const base = S.settings.baseUrl || 'https://www.sahabatmobile.com/api/v1';
+    const model = currentModel();
+    const snippet = buildSnippet(S.snippet || 'curl', base, model);
+    $('snippetCode').textContent = snippet;
+    $('apiBase').textContent = base;
+    $('apiModel').textContent = model;
+  }
+
+  function buildSnippet(kind, base, model) {
+    if (kind === 'python') {
+      return [
+        'from openai import OpenAI',
+        '',
+        'client = OpenAI(',
+        '    base_url="' + base + '",',
+        '    api_key="sk-..."',
+        ')',
+        '',
+        'resp = client.chat.completions.create(',
+        '    model="' + model + '",',
+        '    messages=[{"role": "user", "content": "Halo!"}],',
+        ')',
+        'print(resp.choices[0].message.content)'
+      ].join('\n');
+    }
+    if (kind === 'node') {
+      return [
+        'import OpenAI from "openai";',
+        '',
+        'const client = new OpenAI({',
+        '  baseURL: "' + base + '",',
+        '  apiKey: "sk-...",',
+        '});',
+        '',
+        'const resp = await client.chat.completions.create({',
+        '  model: "' + model + '",',
+        '  messages: [{ role: "user", content: "Halo!" }],',
+        '});',
+        'console.log(resp.choices[0].message.content);'
+      ].join('\n');
+    }
+    if (kind === 'opencode') {
+      return JSON.stringify({
+        $schema: 'https://opencode.ai/config.json',
+        provider: {
+          sahabatmobile: {
+            npm: '@ai-sdk/openai-compatible',
+            name: 'SahabatMobile',
+            options: { baseURL: base, apiKey: '{env:SAHABAT_API_KEY}' },
+            models: { [model]: { name: model } }
+          }
+        }
+      }, null, 2);
+    }
+    return [
+      'curl ' + base + '/chat/completions \\',
+      '  -H "Content-Type: application/json" \\',
+      '  -H "Authorization: Bearer sk-..." \\',
+      '  -d \'{"model":"' + model + '","messages":[{"role":"user","content":"Halo!"}]}\''
+    ].join('\n');
+  }
+
+  // ---------- Settings ----------
+  function openSettings() {
+    $('apiKeyInput').value = '';
+    $('baseUrlInput').value = S.settings.baseUrl || '';
+    $('settingsModal').classList.remove('hidden');
+    setTimeout(() => $('apiKeyInput').focus(), 50);
+  }
+
+  async function saveSettings() {
+    const payload = { baseUrl: $('baseUrlInput').value.trim() };
+    const key = $('apiKeyInput').value.trim();
+    if (key) payload.apiKey = key;
+    const res = await api.saveSettings(payload);
+    S.settings = res;
+    updateKeyBadge();
+    $('settingsModal').classList.add('hidden');
+    if (S.settings.hasKey) loadModels();
+    if (S.local.tabs.length === 0) renderSnippet();
+  }
+
+  // ---------- Boot ----------
+  function fitAll() {
+    try { S.local.fit && S.local.fit.fit(); } catch {}
+    try { S.ssh.fit && S.ssh.fit.fit(); } catch {}
+  }
+
+  function bind() {
+    document.querySelectorAll('.nav-item').forEach((b) => b.addEventListener('click', () => switchView(b.dataset.view)));
+    $('sendChat').addEventListener('click', sendChat);
+    $('stopChat').addEventListener('click', () => { if (S.requestId) api.abortChat(S.requestId); });
+    $('chatInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+    });
+    $('modelSelect').addEventListener('change', (e) => setModel(e.target.value));
+    $('openSettings').addEventListener('click', openSettings);
+    $('cancelSettings').addEventListener('click', () => $('settingsModal').classList.add('hidden'));
+    $('saveSettings').addEventListener('click', saveSettings);
+    $('settingsModal').addEventListener('click', (e) => { if (e.target.id === 'settingsModal') $('settingsModal').classList.add('hidden'); });
+
+    $('openFolder').addEventListener('click', openFolder);
+    $('refreshModels').addEventListener('click', loadModels);
+    $('modelSearch').addEventListener('input', renderModelList);
+
+    $('termToggle').addEventListener('click', () => {
+      const pane = $('localTermPane');
+      pane.classList.toggle('collapsed');
+      $('termToggle').textContent = pane.classList.contains('collapsed') ? '+' : '–';
+      setTimeout(fitAll, 80);
+    });
+    $('termClear').addEventListener('click', () => S.local.term && S.local.term.clear());
+
+    $('agentSend').addEventListener('click', sendAgent);
+    $('agentInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendAgent(); }
+    });
+
+    $('snippetChips').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-snippet]');
+      if (!btn) return;
+      S.snippet = btn.dataset.snippet;
+      document.querySelectorAll('#snippetChips .chip').forEach((c) => c.classList.toggle('active', c === btn));
+      renderSnippet();
+    });
+    $('copyBase').addEventListener('click', async () => { await api.copyText(S.settings.baseUrl); toast('Base URL disalin'); });
+    $('copySnippet').addEventListener('click', async () => { await api.copyText($('snippetCode').textContent); toast('Snippet disalin'); });
+
+    $('sshAuth').addEventListener('change', () => {
+      const key = $('sshAuth').value === 'key';
+      $('sshKeyField').classList.toggle('hidden', !key);
+      $('sshPassField').classList.toggle('hidden', key);
+    });
+    $('sshForm').addEventListener('submit', connectSsh);
+    $('sshDisconnect').addEventListener('click', disconnectSsh);
+    $('sshRefresh').addEventListener('click', () => { if (S.ssh.dir) loadRemoteDir(S.ssh.dir); });
+    $('sshTermToggle').addEventListener('click', () => {
+      const pane = $('sshTermPane');
+      pane.classList.toggle('collapsed');
+      $('sshTermToggle').textContent = pane.classList.contains('collapsed') ? '+' : '–';
+      setTimeout(fitAll, 80);
+    });
+    $('sshTermClear').addEventListener('click', () => S.ssh.term && S.ssh.term.clear());
+
+    window.addEventListener('resize', fitAll);
+    window.addEventListener('beforeunload', () => {
+      if (S.ssh.id) api.sshDisconnect(S.ssh.id);
+    });
+    document.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        if (S.view === 'remote') saveActiveRemote();
+        else if (S.view === 'workspace') saveActiveLocal();
+      }
+    });
+  }
+
+  async function init() {
+    aceSetup();
+    bind();
+    S.settings = await api.getSettings();
+    updateKeyBadge();
+    renderModelOptions();
+
+    api.onTermData((d) => {
+      if (S.local.term && d.id === S.local.termId) S.local.term.write(d.data);
+    });
+    api.onTermExit((d) => {
+      if (d.id === S.local.termId) {
+        S.local.termId = null;
+        if (S.local.term) S.local.term.writeln('\r\n[terminal berhenti, kode ' + d.code + ']');
+      }
+    });
+    api.onSshData((d) => {
+      if (S.ssh.term && d.id === S.ssh.id) S.ssh.term.write(d.data);
+    });
+    api.onSshExit((d) => {
+      if (d.id === S.ssh.id && S.ssh.term) S.ssh.term.writeln('\r\n[shell SSH selesai]');
+    });
+    api.onSshClosed((d) => {
+      if (d.id === S.ssh.id) {
+        S.ssh.id = null;
+        $('sshDisconnect').classList.add('hidden');
+        $('sshRoot').textContent = 'Koneksi terputus';
+        if (S.ssh.term) S.ssh.term.writeln('\r\n[koneksi SSH terputus]');
+      }
+    });
+
+    renderSnippet();
+    if (S.settings.hasKey) loadModels();
+    else setTimeout(openSettings, 400);
+  }
+
+  window.addEventListener('DOMContentLoaded', init);
+})();

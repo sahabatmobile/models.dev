@@ -526,3 +526,317 @@ button.block {
   gap: 8px;
   margin-top: 4px;
 }
+
+/* ---------- Workspace / IDE ---------- */
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr) 336px;
+}
+
+.ws-files {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+}
+
+.ws-editor {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.ws-agent {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+}
+
+.pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  flex: 0 0 auto;
+}
+
+.pane-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.mini-check {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted);
+}
+
+.mini-check input {
+  width: auto;
+  margin: 0;
+}
+
+.root-path {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-family: ui-monospace, Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 0;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tree-row:hover {
+  background: var(--panel-2);
+}
+
+.caret {
+  width: 12px;
+  color: var(--muted);
+  flex: 0 0 12px;
+  text-align: center;
+}
+
+.fname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tabbar {
+  display: flex;
+  gap: 1px;
+  min-height: 34px;
+  overflow-x: auto;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px;
+  font-size: 12px;
+  color: var(--muted);
+  border-right: 1px solid var(--border);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tab.active {
+  color: var(--text);
+  background: var(--bg);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.tab-close {
+  opacity: 0.55;
+}
+
+.tab-close:hover {
+  opacity: 1;
+  color: #fff;
+}
+
+.editor {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  font-size: 13px;
+}
+
+.terminal-pane {
+  height: 220px;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: #0b0e13;
+}
+
+.terminal-pane.collapsed {
+  height: 34px;
+}
+
+.terminal-pane.collapsed .term-host {
+  display: none;
+}
+
+.term-host {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 8px;
+  overflow: hidden;
+}
+
+.term-host .xterm {
+  height: 100%;
+}
+
+.agent-log {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.agent-user {
+  align-self: flex-end;
+  max-width: 100%;
+  background: var(--accent);
+  color: #fff;
+  padding: 7px 10px;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-ai {
+  background: var(--panel-2);
+  padding: 7px 10px;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-tool {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: #93c5fd;
+  word-break: break-all;
+}
+
+.agent-result {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.agent-result summary {
+  cursor: pointer;
+}
+
+.agent-result pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  background: #0b0e13;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  max-height: 200px;
+  overflow: auto;
+}
+
+.agent-error {
+  color: #fca5a5;
+}
+
+.agent-input {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-input textarea {
+  resize: none;
+  width: 100%;
+}
+
+.model-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+/* ---------- Remote SSH ---------- */
+.remote {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ssh-form {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.ssh-form .field input,
+.ssh-form .field select {
+  min-width: 120px;
+}
+
+.remote-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 262px minmax(0, 1fr);
+}
+
+@media (max-width: 1150px) {
+  .workspace {
+    grid-template-columns: 200px minmax(0, 1fr) 290px;
+  }
+}
+
+/* ---------- Toast ---------- */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  background: #1d232c;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  z-index: 60;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}

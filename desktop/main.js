@@ -1,10 +1,22 @@
-const { app, BrowserWindow, ipcMain, safeStorage, shell, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, shell, clipboard, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const { spawn } = require('child_process');
+const { Client: SshClient } = require('ssh2');
 
 const DEFAULT_BASE_URL = 'https://www.sahabatmobile.com/api/v1';
+const IGNORED_DIRS = new Set(['node_modules', '.git', 'dist', 'out', '.next', '.cache', '__pycache__']);
+const MAX_READ = 5 * 1024 * 1024;
+
 const controllers = new Map();
+const terminals = new Map();
+const sshSessions = new Map();
 let storedKey = null;
+let workspaceRoot = null;
+let termSeq = 0;
+let sshSeq = 0;
+let allowAgentCommands = false;
 
 function settingsFile() {
   return path.join(app.getPath('userData'), 'settings.json');
@@ -91,10 +103,10 @@ function errorMessage(status, text) {
 
 function createWindow() {
   const win = new BrowserWindow({
-    width: 1100,
-    height: 760,
-    minWidth: 820,
-    minHeight: 560,
+    width: 1320,
+    height: 820,
+    minWidth: 960,
+    minHeight: 620,
     backgroundColor: '#0f1115',
     title: 'SahabatMobile Desktop',
     webPreferences: {
@@ -108,6 +120,126 @@ function createWindow() {
     shell.openExternal(url);
     return { action: 'deny' };
   });
+  if (process.argv.includes('--smoke-test')) {
+    win.webContents.on('console-message', (event, level, message, line, sourceId) => {
+      console.log('[renderer:' + level + '] ' + message + ' (' + sourceId + ':' + line + ')');
+    });
+    win.webContents.on('did-finish-load', () => {
+      setTimeout(async () => {
+        try {
+          const result = await win.webContents.executeJavaScript(`(async () => {
+            const out = {};
+            out.ace = typeof window.ace;
+            out.term = typeof window.Terminal;
+            out.addon = typeof window.FitAddon;
+            document.querySelector('[data-view="workspace"]').click();
+            await new Promise(r => setTimeout(r, 700));
+            out.aceContent = !!document.querySelector('#editor .ace_content');
+            out.xterm = !!document.querySelector('#termLocal .xterm');
+            document.querySelector('[data-view="remote"]').click();
+            await new Promise(r => setTimeout(r, 700));
+            out.reditor = !!document.querySelector('#reditor .ace_content');
+            out.sshTerm = !!document.querySelector('#sshTerm .xterm');
+            document.querySelector('[data-view="models"]').click();
+            document.querySelector('[data-view="api"]').click();
+            await new Promise(r => setTimeout(r, 300));
+            out.snippet = (document.getElementById('snippetCode').textContent || '').slice(0, 20);
+            return out;
+          })()`);
+          console.log('SMOKE_RESULT ' + JSON.stringify(result));
+        } catch (err) {
+          console.log('SMOKE_ERR ' + err.message);
+        }
+        app.quit();
+      }, 2500);
+    });
+  }
+}
+
+function send(channel, payload) {
+  const wins = BrowserWindow.getAllWindows();
+  if (wins[0] && !wins[0].isDestroyed()) wins[0].webContents.send(channel, payload);
+}
+
+function resolveInRoot(target) {
+  if (!workspaceRoot) throw new Error('Folder kerja belum dibuka.');
+  const abs = path.resolve(workspaceRoot, target || '.');
+  const rel = path.relative(workspaceRoot, abs);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('Path di luar folder kerja.');
+  return abs;
+}
+
+function assertTextBuffer(buf, label) {
+  if (buf.length > MAX_READ) throw new Error(label + ' terlalu besar (maks 5 MB).');
+  if (buf.includes(0)) throw new Error(label + ' terdeteksi biner, tidak bisa dibuka di editor.');
+  return buf.toString('utf8');
+}
+
+async function buildTree(dir, depth) {
+  if (depth > 6) return [];
+  let entries;
+  try {
+    entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  entries = entries.filter((e) => !IGNORED_DIRS.has(e.name));
+  entries.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
+  const nodes = [];
+  for (const entry of entries.slice(0, 400)) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      nodes.push({ name: entry.name, path: full, dir: true, children: await buildTree(full, depth + 1) });
+    } else {
+      nodes.push({ name: entry.name, path: full, dir: false });
+    }
+  }
+  return nodes;
+}
+
+function localShell() {
+  if (process.platform === 'win32') {
+    return { file: 'powershell.exe', args: ['-NoLogo', '-NoProfile'] };
+  }
+  return { file: process.env.SHELL || '/bin/bash', args: ['-i'] };
+}
+
+function runShellCommand(command, cwd, timeoutMs) {
+  return new Promise((resolve) => {
+    const sh = localShell();
+    const args = process.platform === 'win32'
+      ? ['-NoLogo', '-NoProfile', '-Command', command]
+      : ['-lc', command];
+    let child;
+    try {
+      child = spawn(sh.file, args, { cwd: cwd || workspaceRoot || os.homedir(), env: process.env, windowsHide: true });
+    } catch (err) {
+      resolve({ code: -1, stdout: '', stderr: err.message });
+      return;
+    }
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch {}
+      stderr += '\n[timeout] perintah dihentikan setelah ' + Math.round(timeoutMs / 1000) + ' detik.';
+    }, timeoutMs || 120000);
+    child.stdout.on('data', (d) => { stdout += d.toString('utf8'); if (stdout.length > 200000) stdout = stdout.slice(-200000); });
+    child.stderr.on('data', (d) => { stderr += d.toString('utf8'); if (stderr.length > 200000) stderr = stderr.slice(-200000); });
+    child.on('error', (err) => { clearTimeout(timer); resolve({ code: -1, stdout, stderr: stderr + err.message }); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
+  });
+}
+
+function rmTree(dir) {
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      const p = path.join(dir, name);
+      const st = fs.lstatSync(p);
+      if (st.isDirectory()) rmTree(p);
+      else fs.unlinkSync(p);
+    }
+    fs.rmdirSync(dir);
+  } catch {}
 }
 
 app.whenReady().then(() => {
@@ -120,6 +252,11 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  for (const child of terminals.values()) { try { child.kill(); } catch {} }
+  for (const s of sshSessions.values()) { try { s.client.end(); } catch {} }
 });
 
 ipcMain.handle('settings:get', () => ({
@@ -260,5 +397,321 @@ ipcMain.handle('chat:start', async (event, payload) => {
 ipcMain.handle('chat:abort', (event, requestId) => {
   const controller = controllers.get(requestId);
   if (controller) controller.abort();
+  return { ok: true };
+});
+
+ipcMain.handle('chat:complete', async (event, payload) => {
+  if (!storedKey) return { ok: false, error: { message: 'API key belum diisi.' } };
+  const body = {
+    model: payload.model,
+    messages: payload.messages,
+    stream: false,
+    temperature: typeof payload.temperature === 'number' ? payload.temperature : 0.3,
+    max_tokens: payload.maxTokens || 4096
+  };
+  if (Array.isArray(payload.tools) && payload.tools.length) {
+    body.tools = payload.tools;
+    body.tool_choice = 'auto';
+  }
+  try {
+    const res = await fetch(getBaseUrl() + '/chat/completions', {
+      method: 'POST',
+      headers: authHeaders(storedKey),
+      body: JSON.stringify(body)
+    });
+    const text = await res.text();
+    if (!res.ok) return { ok: false, error: errorMessage(res.status, text) };
+    const parsed = JSON.parse(text);
+    const choice = (parsed.choices && parsed.choices[0]) || null;
+    return {
+      ok: true,
+      message: (choice && choice.message) || { role: 'assistant', content: '' },
+      finishReason: choice && choice.finish_reason,
+      usage: parsed.usage || null
+    };
+  } catch (err) {
+    return { ok: false, error: { message: 'Koneksi gagal: ' + err.message } };
+  }
+});
+
+ipcMain.handle('dialog:openFolder', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
+  if (result.canceled || !result.filePaths.length) return { ok: false };
+  workspaceRoot = result.filePaths[0];
+  const tree = await buildTree(workspaceRoot, 0);
+  return { ok: true, root: workspaceRoot, tree };
+});
+
+ipcMain.handle('workspace:info', async () => {
+  if (!workspaceRoot) return { ok: false };
+  return { ok: true, root: workspaceRoot, tree: await buildTree(workspaceRoot, 0) };
+});
+
+ipcMain.handle('workspace:tree', async () => {
+  if (!workspaceRoot) return { ok: false };
+  return { ok: true, root: workspaceRoot, tree: await buildTree(workspaceRoot, 0) };
+});
+
+ipcMain.handle('fs:read', async (event, filePath) => {
+  try {
+    const abs = resolveInRoot(filePath);
+    const buf = await fs.promises.readFile(abs);
+    return { ok: true, path: abs, content: assertTextBuffer(buf, 'File') };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('fs:write', async (event, payload) => {
+  try {
+    const abs = resolveInRoot(payload.path);
+    await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+    await fs.promises.writeFile(abs, String(payload.content ?? ''), 'utf8');
+    return { ok: true, path: abs };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('fs:remove', async (event, filePath) => {
+  try {
+    const abs = resolveInRoot(filePath);
+    const st = await fs.promises.lstat(abs);
+    if (st.isDirectory()) rmTree(abs);
+    else await fs.promises.unlink(abs);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('term:start', async (event, payload) => {
+  const id = 't' + (++termSeq);
+  const sh = localShell();
+  const cwd = payload && payload.cwd ? payload.cwd : (workspaceRoot || os.homedir());
+  let child;
+  try {
+    child = spawn(sh.file, sh.args, { cwd, env: process.env, windowsHide: true });
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+  child.stdout.on('data', (d) => send('term:data', { id, data: d.toString('utf8') }));
+  child.stderr.on('data', (d) => send('term:data', { id, data: d.toString('utf8') }));
+  child.on('exit', (code) => {
+    terminals.delete(id);
+    send('term:exit', { id, code });
+  });
+  child.on('error', (err) => send('term:data', { id, data: '\r\n[error] ' + err.message + '\r\n' }));
+  terminals.set(id, child);
+  return { ok: true, id, cwd, shell: sh.file };
+});
+
+ipcMain.handle('term:input', (event, payload) => {
+  const child = terminals.get(payload.id);
+  if (child && child.stdin.writable) child.stdin.write(String(payload.data || ''));
+  return { ok: Boolean(child) };
+});
+
+ipcMain.handle('term:stop', (event, id) => {
+  const child = terminals.get(id);
+  if (child) { try { child.kill(); } catch {} }
+  terminals.delete(id);
+  return { ok: true };
+});
+
+ipcMain.handle('agent:listDir', async (event, dir) => {
+  try {
+    const abs = resolveInRoot(dir || '.');
+    const entries = await fs.promises.readdir(abs, { withFileTypes: true });
+    const items = entries
+      .filter((e) => !IGNORED_DIRS.has(e.name))
+      .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
+      .slice(0, 500)
+      .map((e) => ({ name: e.name, type: e.isDirectory() ? 'dir' : 'file' }));
+    return { ok: true, path: abs, items };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('agent:readFile', async (event, filePath) => {
+  try {
+    const abs = resolveInRoot(filePath);
+    const buf = await fs.promises.readFile(abs);
+    const content = assertTextBuffer(buf, 'File');
+    return { ok: true, path: abs, content: content.length > 120000 ? content.slice(0, 120000) + '\n...[dipotong]' : content };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('agent:writeFile', async (event, payload) => {
+  try {
+    const abs = resolveInRoot(payload.path);
+    await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+    await fs.promises.writeFile(abs, String(payload.content ?? ''), 'utf8');
+    return { ok: true, path: abs };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('agent:runCommand', async (event, payload) => {
+  if (!workspaceRoot) return { ok: false, error: 'Folder kerja belum dibuka.' };
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!allowAgentCommands) {
+    const answer = await dialog.showMessageBox(win, {
+      type: 'warning',
+      buttons: ['Jalankan', 'Batal'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Agen menjalankan perintah',
+      message: 'Agen ingin menjalankan perintah berikut:',
+      detail: String(payload.command || '').slice(0, 2000),
+      checkboxLabel: 'Izinkan agen menjalankan perintah selama sesi ini',
+      checkboxChecked: false
+    });
+    if (answer.response !== 0) return { ok: true, denied: true, output: 'Pengguna menolak eksekusi perintah.' };
+    if (answer.checkboxChecked) allowAgentCommands = true;
+  }
+  const cwd = payload.cwd ? resolveInRoot(payload.cwd) : workspaceRoot;
+  const result = await runShellCommand(String(payload.command || ''), cwd, payload.timeoutMs);
+  return {
+    ok: true,
+    code: result.code,
+    output: (result.stdout + (result.stderr ? '\n[stderr]\n' + result.stderr : '')).slice(0, 60000) || '(tanpa output)'
+  };
+});
+
+ipcMain.handle('ssh:connect', async (event, cfg) => {
+  const id = 's' + (++sshSeq);
+  const client = new SshClient();
+  const options = {
+    host: String(cfg.host || '').trim(),
+    port: Number(cfg.port) || 22,
+    username: String(cfg.username || '').trim(),
+    readyTimeout: 25000,
+    keepaliveInterval: 15000
+  };
+  if (!options.host || !options.username) return { ok: false, error: 'Host dan username wajib diisi.' };
+  if (cfg.authType === 'key' && cfg.privateKey) {
+    try {
+      options.privateKey = fs.readFileSync(String(cfg.privateKey).trim());
+    } catch (err) {
+      return { ok: false, error: 'Gagal membaca private key: ' + err.message };
+    }
+    if (cfg.passphrase) options.passphrase = String(cfg.passphrase);
+  } else {
+    options.password = String(cfg.password || '');
+  }
+  try {
+    await new Promise((resolve, reject) => {
+      client.once('ready', resolve);
+      client.once('error', reject);
+      client.connect(options);
+    });
+    const sftp = await new Promise((resolve, reject) => client.sftp((err, s) => (err ? reject(err) : resolve(s))));
+    const home = await new Promise((resolve) => sftp.realpath('.', (err, p) => resolve(err ? '.' : p)));
+    sshSessions.set(id, { client, sftp, shell: null, home });
+    client.on('close', () => {
+      const s = sshSessions.get(id);
+      if (s) sshSessions.delete(id);
+      send('ssh:closed', { id });
+    });
+    return { ok: true, id, home };
+  } catch (err) {
+    try { client.end(); } catch {}
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ssh:shell', async (event, payload) => {
+  const s = sshSessions.get(payload.id);
+  if (!s) return { ok: false, error: 'Sesi SSH tidak ditemukan.' };
+  if (s.shell) return { ok: true };
+  try {
+    const stream = await new Promise((resolve, reject) => {
+      s.client.shell({ term: 'xterm-256color', cols: payload.cols || 120, rows: payload.rows || 30 }, (err, st) => (err ? reject(err) : resolve(st)));
+    });
+    stream.setEncoding('utf8');
+    stream.on('data', (d) => send('ssh:data', { id: payload.id, data: d }));
+    stream.stderr.on('data', (d) => send('ssh:data', { id: payload.id, data: d }));
+    stream.on('close', () => send('ssh:exit', { id: payload.id }));
+    s.shell = stream;
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ssh:input', (event, payload) => {
+  const s = sshSessions.get(payload.id);
+  if (s && s.shell) s.shell.write(String(payload.data || ''));
+  return { ok: Boolean(s && s.shell) };
+});
+
+ipcMain.handle('ssh:resize', (event, payload) => {
+  const s = sshSessions.get(payload.id);
+  if (s && s.shell) s.shell.setWindow(payload.rows || 30, payload.cols || 120, 0, 0);
+  return { ok: Boolean(s && s.shell) };
+});
+
+ipcMain.handle('ssh:listDir', async (event, payload) => {
+  const s = sshSessions.get(payload.id);
+  if (!s) return { ok: false, error: 'Sesi SSH tidak ditemukan.' };
+  try {
+    const entries = await new Promise((resolve, reject) => {
+      s.sftp.readdir(payload.dir, (err, list) => (err ? reject(err) : resolve(list)));
+    });
+    const items = entries
+      .filter((e) => !IGNORED_DIRS.has(e.filename) && e.filename !== '.' && e.filename !== '..')
+      .sort((a, b) => Number(b.attrs.isDirectory()) - Number(a.attrs.isDirectory()) || a.filename.localeCompare(b.filename))
+      .slice(0, 600)
+      .map((e) => ({
+        name: e.filename,
+        path: payload.dir.replace(/\/+$/, '') + '/' + e.filename,
+        dir: e.attrs.isDirectory(),
+        children: []
+      }));
+    return { ok: true, dir: payload.dir, items };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ssh:readFile', async (event, payload) => {
+  const s = sshSessions.get(payload.id);
+  if (!s) return { ok: false, error: 'Sesi SSH tidak ditemukan.' };
+  try {
+    const buf = await new Promise((resolve, reject) => {
+      s.sftp.readFile(payload.path, (err, data) => (err ? reject(err) : resolve(data)));
+    });
+    return { ok: true, content: assertTextBuffer(buf, 'File remote') };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ssh:writeFile', async (event, payload) => {
+  const s = sshSessions.get(payload.id);
+  if (!s) return { ok: false, error: 'Sesi SSH tidak ditemukan.' };
+  try {
+    await new Promise((resolve, reject) => {
+      s.sftp.writeFile(payload.path, String(payload.content ?? ''), 'utf8', (err) => (err ? reject(err) : resolve()));
+    });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ssh:disconnect', (event, id) => {
+  const s = sshSessions.get(id);
+  if (s) {
+    try { if (s.shell) s.shell.end(); } catch {}
+    try { s.client.end(); } catch {}
+    sshSessions.delete(id);
+  }
   return { ok: true };
 });

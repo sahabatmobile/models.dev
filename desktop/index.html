@@ -2,133 +2,180 @@
 <html lang="id">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; font-src 'self' data:;" />
   <title>SahabatMobile Desktop</title>
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="vendor/xterm/xterm.css" />
 </head>
 <body>
   <div class="app">
     <aside class="sidebar">
-      <div class="brand">
-        <span class="dot"></span>
-        <span>SahabatMobile</span>
-      </div>
+      <div class="brand"><span class="dot"></span> SahabatMobile</div>
       <nav class="nav">
-        <button class="nav-item active" data-tab="chat">Chat</button>
-        <button class="nav-item" data-tab="trae">Integrasi Trae</button>
-        <button class="nav-item" data-tab="api">API &amp; Snippet</button>
-        <button class="nav-item" data-tab="models">Model</button>
+        <button class="nav-item active" data-view="chat">Chat</button>
+        <button class="nav-item" data-view="workspace">Workspace</button>
+        <button class="nav-item" data-view="remote">Remote SSH</button>
+        <button class="nav-item" data-view="models">Model</button>
+        <button class="nav-item" data-view="api">API &amp; Snippet</button>
       </nav>
       <div class="modes">
         <div class="mode active"><span>Developer</span><em>aktif</em></div>
         <div class="mode soon"><span>UMKM</span><em>segera</em></div>
         <div class="mode soon"><span>3D Creator</span><em>segera</em></div>
       </div>
-      <button id="openSettings" class="ghost block">Pengaturan API Key</button>
     </aside>
 
     <div class="main">
       <header class="topbar">
-        <div class="title" id="tabTitle">Chat</div>
+        <div class="title" id="viewTitle">Chat</div>
         <div class="controls">
-          <span id="keyBadge" class="badge off">Key belum diisi</span>
           <select id="modelSelect" title="Pilih model"></select>
-          <button id="refreshModels" class="ghost">Muat Model</button>
+          <span id="keyBadge" class="badge off">Key belum diisi</span>
+          <button id="openSettings" class="ghost small">Pengaturan</button>
         </div>
       </header>
 
       <section id="view-chat" class="view">
-        <main id="chat" class="chat">
-          <div class="empty" id="emptyState">
-            <h2>Mulai percakapan</h2>
-            <p>Isi API key lewat Pengaturan, pilih model, lalu kirim pesan.</p>
-          </div>
-        </main>
-        <footer class="composer">
-          <textarea id="input" rows="2" placeholder="Tulis pesan... (Enter kirim, Shift+Enter baris baru)"></textarea>
+        <div class="chat" id="chat"></div>
+        <div class="composer">
+          <textarea id="chatInput" rows="2" placeholder="Tanya apa saja... (Enter kirim, Shift+Enter baris baru)"></textarea>
           <div class="actions">
-            <span id="status" class="status"></span>
-            <button id="send" class="primary">Kirim</button>
-            <button id="stop" class="danger hidden">Stop</button>
+            <span id="chatStatus" class="status"></span>
+            <button id="stopChat" class="ghost small hidden">Stop</button>
+            <button id="sendChat" class="primary">Kirim</button>
           </div>
-        </footer>
+        </div>
       </section>
 
-      <section id="view-trae" class="view hidden">
+      <section id="view-workspace" class="view hidden">
+        <div class="workspace">
+          <div class="ws-files">
+            <div class="pane-head">
+              <span>EXPLORER</span>
+              <button id="openFolder" class="ghost small">Buka Folder</button>
+            </div>
+            <div class="root-path small muted" id="wsRoot">Belum ada folder</div>
+            <div id="fileTree" class="tree"></div>
+          </div>
+
+          <div class="ws-editor">
+            <div class="tabbar" id="tabbar"></div>
+            <div id="editor" class="editor"></div>
+            <div class="terminal-pane" id="localTermPane">
+              <div class="pane-head">
+                <span>TERMINAL</span>
+                <div class="pane-actions">
+                  <button id="termClear" class="ghost small">Bersihkan</button>
+                  <button id="termToggle" class="ghost small">–</button>
+                </div>
+              </div>
+              <div id="termLocal" class="term-host"></div>
+            </div>
+          </div>
+
+          <div class="ws-agent">
+            <div class="pane-head">
+              <span>AGENT</span>
+              <label class="mini-check"><input type="checkbox" id="allowCmd" /> izinkan perintah</label>
+            </div>
+            <div id="agentLog" class="agent-log"></div>
+            <div class="agent-input">
+              <textarea id="agentInput" rows="3" placeholder="Minta agen membaca/mengubah file atau menjalankan perintah di folder ini..."></textarea>
+              <div class="actions">
+                <span id="agentStatus" class="status small"></span>
+                <button id="agentSend" class="primary small">Kirim</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-remote" class="view hidden">
+        <div class="remote">
+          <form id="sshForm" class="ssh-form">
+            <div class="field"><label>Host / IP</label><input id="sshHost" placeholder="mis. 103.150.1.2" required /></div>
+            <div class="field" style="max-width:90px"><label>Port</label><input id="sshPort" type="number" value="22" /></div>
+            <div class="field"><label>Username</label><input id="sshUser" placeholder="root" required /></div>
+            <div class="field"><label>Auth</label>
+              <select id="sshAuth">
+                <option value="password">Password</option>
+                <option value="key">Private Key</option>
+              </select>
+            </div>
+            <div class="field grow" id="sshPassField"><label>Password</label><input id="sshPassword" type="password" placeholder="••••••" /></div>
+            <div class="field grow hidden" id="sshKeyField"><label>Path Private Key</label><input id="sshKey" placeholder="C:\Users\...\.ssh\id_rsa" /></div>
+            <button id="sshConnect" type="submit" class="primary">Hubungkan</button>
+            <button id="sshDisconnect" type="button" class="ghost hidden">Putuskan</button>
+          </form>
+          <div class="remote-body">
+            <div class="ws-files">
+              <div class="pane-head">
+                <span>REMOTE FILES</span>
+                <button id="sshRefresh" class="ghost small">Refresh</button>
+              </div>
+              <div id="sshRoot" class="root-path small muted">Belum terhubung</div>
+              <div id="sshTree" class="tree"></div>
+            </div>
+            <div class="ws-editor">
+              <div class="tabbar" id="rtabbar"></div>
+              <div id="reditor" class="editor"></div>
+              <div class="terminal-pane" id="sshTermPane">
+                <div class="pane-head">
+                  <span>SSH TERMINAL</span>
+                  <div class="pane-actions">
+                    <button id="sshTermClear" class="ghost small">Bersihkan</button>
+                    <button id="sshTermToggle" class="ghost small">–</button>
+                  </div>
+                </div>
+                <div id="sshTerm" class="term-host"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-models" class="view hidden">
         <div class="panel">
-          <h2>Integrasi TRAE (trae.ai)</h2>
-          <p class="muted">Hubungkan AI Gateway SahabatMobile ke Trae lewat menu Custom Model.</p>
-          <ol class="steps">
-            <li>Buka Trae → <b>Settings</b> → <b>Models</b> → <b>Add Model</b>.</li>
-            <li>Pilih <b>Custom Model</b> (bukan provider preset).</li>
-            <li>Isi field di bawah ini persis, lalu klik <b>Add Model</b>.</li>
-            <li>Pilih model SahabatMobile di pemilih model Trae, lalu mulai chat.</li>
-          </ol>
-
+          <h2>Model</h2>
+          <p class="muted">Daftar model dari gateway SahabatMobile. Klik <em>Pakai</em> untuk menjadikannya model aktif, atau salin ID-nya.</p>
           <div class="field-row">
             <div class="field grow">
-              <label>API Format</label>
-              <div class="value">OpenAI Chat Completions</div>
+              <label>Cari model</label>
+              <input id="modelSearch" placeholder="mis. minimax, mimo, gpt" />
             </div>
-            <div class="field">
-              <label>Full URL</label>
-              <div class="value">Off</div>
-            </div>
+            <button id="refreshModels" class="ghost">Muat ulang</button>
           </div>
-
-          <div class="field-row">
-            <div class="field grow">
-              <label>Custom Request URL</label>
-              <div class="value" id="traeBaseUrl">https://www.sahabatmobile.com/api/v1</div>
-            </div>
-            <button class="ghost" data-copy="traeBaseUrl">Salin</button>
-          </div>
-
-          <div class="field-row">
-            <div class="field grow">
-              <label>Model ID</label>
-              <div class="value" id="traeModelId">-</div>
-            </div>
-            <button class="ghost" data-copy="traeModelId">Salin</button>
-          </div>
-
-          <div class="field-row">
-            <div class="field grow">
-              <label>API Key</label>
-              <div class="value" id="traeKeyHint">Key tersimpan di perangkat ini</div>
-            </div>
-            <button class="ghost" id="copyKeyBtn">Salin key</button>
-          </div>
-
-          <p class="note">Untuk fitur agent / tool calling di Trae, pilih model <b>MiniMax-M3</b>. Model lain tetap bisa untuk chat biasa.</p>
-
-          <div class="row-actions">
-            <button class="primary" id="testConnBtn">Tes koneksi</button>
-            <span id="testResult" class="status"></span>
-          </div>
+          <div id="modelList" class="model-list"></div>
         </div>
       </section>
 
       <section id="view-api" class="view hidden">
         <div class="panel">
           <h2>API &amp; Snippet</h2>
-          <p class="muted">Contoh kode memakai model yang sedang dipilih.</p>
-          <div class="chips" id="snippetTabs">
+          <p class="muted">Pakai gateway SahabatMobile dari aplikasi apa pun yang mendukung API OpenAI. Ganti <code>sk-...</code> dengan API key Anda.</p>
+
+          <div class="field-row">
+            <div class="field grow">
+              <label>Base URL</label>
+              <div class="value" id="apiBase">https://www.sahabatmobile.com/api/v1</div>
+            </div>
+            <button id="copyBase" class="ghost">Salin</button>
+          </div>
+
+          <div class="chips" id="snippetChips">
             <button class="chip active" data-snippet="curl">cURL</button>
             <button class="chip" data-snippet="python">Python</button>
             <button class="chip" data-snippet="node">Node.js</button>
             <button class="chip" data-snippet="opencode">OpenCode</button>
           </div>
-          <pre id="snippetBox" class="code"></pre>
-          <button class="ghost" id="copySnippetBtn">Salin snippet</button>
-        </div>
-      </section>
+          <pre class="code" id="snippetCode"></pre>
+          <div class="row-actions">
+            <button id="copySnippet" class="primary">Salin snippet</button>
+          </div>
 
-      <section id="view-models" class="view hidden">
-        <div class="panel">
-          <h2>Daftar Model</h2>
-          <input id="modelSearch" type="text" placeholder="Cari model..." spellcheck="false" />
-          <div id="modelList" class="model-list"></div>
+          <div class="note">
+            Model yang dipakai: <strong id="apiModel">-</strong>. Untuk agent / tool calling pilih <strong>MiniMax-M3</strong>.
+          </div>
         </div>
       </section>
     </div>
@@ -136,28 +183,44 @@
 
   <div id="settingsModal" class="modal hidden">
     <div class="modal-card">
-      <h3>Masukkan API Key dulu</h3>
-      <p class="muted small">Key PAYG diawali <b>sk-sm-</b>. Key paket ada di halaman Plan Details.</p>
-      <label>
-        Base URL
-        <input id="baseUrlInput" type="text" spellcheck="false" />
+      <h3>Pengaturan</h3>
+      <label>API Key SahabatMobile
+        <input id="apiKeyInput" type="password" placeholder="sk-..." autocomplete="off" />
       </label>
-      <label>
-        API Key
-        <input id="apiKeyInput" type="password" placeholder="sk-sm-..." spellcheck="false" />
-      </label>
-      <p class="hint" id="keyHint"></p>
-      <label>
-        System prompt (opsional)
-        <input id="systemInput" type="text" placeholder="Kamu adalah asisten yang membantu." />
+      <p class="hint">Key disimpan terenkripsi di perangkat ini. Belum punya? Ambil di halaman API Keys / Plan Details akun SahabatMobile.</p>
+      <label>Base URL
+        <input id="baseUrlInput" placeholder="https://www.sahabatmobile.com/api/v1" />
       </label>
       <div class="modal-actions">
         <button id="cancelSettings" class="ghost">Batal</button>
-        <button id="saveSettings" class="primary">Simpan &amp; Lanjut</button>
+        <button id="saveSettings" class="primary">Simpan</button>
       </div>
     </div>
   </div>
 
+  <script src="vendor/ace/ace.js"></script>
+  <script src="vendor/ace/theme-tomorrow_night.js"></script>
+  <script src="vendor/ace/mode-javascript.js"></script>
+  <script src="vendor/ace/mode-typescript.js"></script>
+  <script src="vendor/ace/mode-python.js"></script>
+  <script src="vendor/ace/mode-html.js"></script>
+  <script src="vendor/ace/mode-css.js"></script>
+  <script src="vendor/ace/mode-json.js"></script>
+  <script src="vendor/ace/mode-markdown.js"></script>
+  <script src="vendor/ace/mode-sh.js"></script>
+  <script src="vendor/ace/mode-sql.js"></script>
+  <script src="vendor/ace/mode-xml.js"></script>
+  <script src="vendor/ace/mode-yaml.js"></script>
+  <script src="vendor/ace/mode-rust.js"></script>
+  <script src="vendor/ace/mode-golang.js"></script>
+  <script src="vendor/ace/mode-php.js"></script>
+  <script src="vendor/ace/mode-ruby.js"></script>
+  <script src="vendor/ace/mode-java.js"></script>
+  <script src="vendor/ace/mode-c_cpp.js"></script>
+  <script src="vendor/ace/mode-csharp.js"></script>
+  <script src="vendor/ace/mode-ini.js"></script>
+  <script src="vendor/xterm/xterm.js"></script>
+  <script src="vendor/xterm/addon-fit.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>
