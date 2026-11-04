@@ -1,14 +1,17 @@
-const { app, BrowserWindow, ipcMain, safeStorage, shell, clipboard, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, shell, clipboard, dialog, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const { spawn, execFileSync, spawnSync } = require('child_process');
+const { Readable } = require('stream');
 const { Client: SshClient } = require('ssh2');
 const { Client: FtpClient } = require('basic-ftp');
 const AdmZip = require('adm-zip');
+const dbEngine = require('./db');
 
 const DEFAULT_BASE_URL = 'https://www.sahabatmobile.com/api/v1';
+const DEFAULT_UPDATE_FEED = 'https://raw.githubusercontent.com/sahabatmobile/models.dev/dev/desktop/update.json';
 const IGNORED_DIRS = new Set(['node_modules', '.git', 'dist', 'out', '.next', '.cache', '__pycache__']);
 const MAX_READ = 5 * 1024 * 1024;
 const posix = path.posix;
@@ -39,6 +42,19 @@ function decryptSecret(value) {
   }
 }
 
+const PROFILE_PROTOCOLS = ['sftp', 'ftp', 'ftps', ...dbEngine.KINDS];
+
+function normalizeProfileProtocol(p) {
+  p = String(p || '').toLowerCase().trim();
+  if (p === 'postgresql' || p === 'pgsql') p = 'postgres';
+  if (p === 'mariadb') p = 'mysql';
+  return PROFILE_PROTOCOLS.includes(p) ? p : 'sftp';
+}
+
+function defaultPortOf(p) {
+  return ({ sftp: 22, ftp: 21, ftps: 21, mysql: 3306, postgres: 5432, sqlserver: 1433, mongodb: 27017, redis: 6379, elasticsearch: 9200 })[p] || 22;
+}
+
 function connectionPublic(p) {
   return {
     id: p.id,
@@ -51,7 +67,10 @@ function connectionPublic(p) {
     privateKeyName: p.privateKey ? path.basename(p.privateKey) : '',
     hasPassword: Boolean(p.password),
     hasPassphrase: Boolean(p.passphrase),
-    lastConnected: p.lastConnected || null
+    database: p.database || '',
+    filePath: p.filePath || '',
+    lastConnected: p.lastConnected || null,
+    updatedAt: p.updatedAt || null
   };
 }
 
@@ -76,28 +95,84 @@ function writeConnections(profiles) {
 }
 
 function saveConnectionProfile(cfg) {
+  if (cfg && cfg.connectionId) {
+    const updated = updateConnectionProfile(cfg.connectionId, cfg);
+    if (updated.ok) return updated.connection;
+  }
   const s = readSettings();
   const list = Array.isArray(s.connections) ? s.connections : [];
   const id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-  const protocol = cfg.protocol === 'ftp' || cfg.protocol === 'ftps' ? cfg.protocol : 'sftp';
-  const username = String(cfg.username || '').trim();
+  const protocol = normalizeProfileProtocol(cfg.protocol);
+  const username = String(cfg.username || cfg.user || '').trim();
   const host = String(cfg.host || '').trim();
+  const filePath = String(cfg.filePath || '').trim();
+  const fallbackName = protocol === 'sqlite'
+    ? 'SQLITE ' + (filePath ? path.basename(filePath) : '')
+    : protocol.toUpperCase() + ' ' + (username ? username + '@' : '') + host;
   const profile = {
     id,
-    name: String(cfg.name || '').trim() || (protocol.toUpperCase() + ' ' + username + '@' + host),
+    name: String(cfg.name || '').trim() || fallbackName,
     protocol,
     host,
-    port: Number(cfg.port) || (protocol === 'sftp' ? 22 : 21),
+    port: Number(cfg.port) || defaultPortOf(protocol),
     username,
     authType: cfg.authType === 'key' ? 'key' : 'password',
     privateKey: cfg.privateKey ? String(cfg.privateKey).trim() : '',
     password: encryptSecret(cfg.password),
     passphrase: encryptSecret(cfg.passphrase),
+    database: String(cfg.database || '').trim(),
+    filePath: protocol === 'sqlite' ? filePath : '',
     lastConnected: new Date().toISOString()
   };
   list.unshift(profile);
   writeConnections(list.slice(0, 30));
   return connectionPublic(profile);
+}
+
+function updateConnectionProfile(id, cfg) {
+  const s = readSettings();
+  const list = Array.isArray(s.connections) ? s.connections : [];
+  const index = list.findIndex((p) => p.id === id);
+  if (index === -1) return { ok: false, error: 'Koneksi tersimpan tidak ditemukan.' };
+  const prev = list[index];
+  const protocol = normalizeProfileProtocol(cfg.protocol);
+  const username = String(cfg.username || cfg.user || '').trim();
+  const host = String(cfg.host || '').trim();
+  const filePath = String(cfg.filePath || prev.filePath || '').trim();
+  if (protocol === 'sqlite') {
+    if (!filePath) return { ok: false, error: 'File database SQLite wajib diisi.' };
+  } else {
+    if (!host) return { ok: false, error: 'Host tidak boleh kosong.' };
+    if (!username) return { ok: false, error: 'Username tidak boleh kosong.' };
+  }
+  const fallbackName = protocol === 'sqlite'
+    ? 'SQLITE ' + (filePath ? path.basename(filePath) : '')
+    : protocol.toUpperCase() + ' ' + (username ? username + '@' : '') + host;
+  const next = {
+    ...prev,
+    name: String(cfg.name || '').trim() || fallbackName,
+    protocol,
+    host,
+    port: Number(cfg.port) || defaultPortOf(protocol),
+    username,
+    authType: cfg.authType === 'key' ? 'key' : 'password',
+    privateKey: cfg.privateKey ? String(cfg.privateKey).trim() : '',
+    database: String(cfg.database !== undefined ? cfg.database : (prev.database || '')).trim(),
+    filePath: protocol === 'sqlite' ? filePath : '',
+    updatedAt: new Date().toISOString()
+  };
+  if (typeof cfg.password === 'string' && cfg.password.length) {
+    next.password = encryptSecret(cfg.password);
+  }
+  if (typeof cfg.passphrase === 'string' && cfg.passphrase.length) {
+    next.passphrase = encryptSecret(cfg.passphrase);
+  }
+  if (cfg.clearPassword) next.password = null;
+  if (cfg.clearPassphrase) next.passphrase = null;
+  list[index] = next;
+  s.connections = list;
+  writeSettings(s);
+  return { ok: true, connection: connectionPublic(next) };
 }
 
 function updateConnectionLastConnected(id) {
@@ -162,6 +237,169 @@ function maskKey(key) {
   if (!key) return '';
   if (key.length <= 8) return '****';
   return key.slice(0, 5) + '****' + key.slice(-4);
+}
+
+const THINKING_PATTERNS = [
+  'think', 'thinking', 'reason', 'reasoning', 'reasoner',
+  'deepseek', 'qwq', 'inkling', 'trinity', 'olmo-',
+  'claude-opus', 'claude-sonnet', 'claude-fable',
+  'mimo-v2', 'minimax-m', 'gpt-5', 'codex',
+  'o1', 'o3', 'o4',
+];
+
+/** Heuristik: model yang kemungkinan mendukung reasoning effort (thinking). */
+function modelSupportsThinking(model) {
+  const id = String(model || '').toLowerCase();
+  if (!id) return false;
+  return THINKING_PATTERNS.some((p) => id.includes(p));
+}
+
+/** Buang field reasoning dari history sebelum dikirim (banyak gateway menolak/eror jika ikut di-echo). */
+function stripReasoningFields(msg) {
+  if (!msg || typeof msg !== 'object') return msg;
+  const { reasoning_content, reasoning, thinking, ...rest } = msg;
+  return rest;
+}
+
+function stripReasoningFromMessages(messages) {
+  return (Array.isArray(messages) ? messages : []).map(stripReasoningFields);
+}
+
+// ---------- Auto-detection paket API key (Hemat / Coding / MiniMax / Pro vs PAYG) ----------
+const PACKAGE_MODELS = {
+  hemat: ['mimo-v2.5'],
+  coding: ['mimo-v2.5', 'mimo-v2.5-pro', 'deepseek-v3.2', 'deepseek-v4-flash', 'qwen3.7-flash'],
+  minimax: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.5', 'MiniMax-M2.1', 'MiniMax-M2'],
+  pro: [
+    'mimo-v2.5', 'mimo-v2.5-pro', 'deepseek-v3.2', 'deepseek-v4-flash', 'qwen3.7-flash',
+    'MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.5', 'MiniMax-M2.1',
+    'deepseek-v4-pro', 'google/gemini-2.5-flash', 'claude-3-haiku',
+  ],
+};
+
+const PACKAGE_NAMES = {
+  hemat: 'Paket Hemat',
+  coding: 'Paket Coding',
+  minimax: 'Paket MiniMax',
+  pro: 'Paket Pro',
+};
+
+const PACKAGE_UNION = Array.from(new Set([].concat(...Object.values(PACKAGE_MODELS))));
+
+// Deteksi 1: awalan key (sk-hemat-..., sk-minimax-..., dst.)
+function packageFromKey(key) {
+  const k = String(key || '').toLowerCase();
+  if (!k) return null;
+  if (k.startsWith('sk-hemat')) return 'hemat';
+  if (k.startsWith('sk-coding')) return 'coding';
+  if (k.startsWith('sk-minimax')) return 'minimax';
+  if (k.startsWith('sk-pro')) return 'pro';
+  return null;
+}
+
+function packageFromText(text) {
+  const t = String(text || '').toLowerCase();
+  if (!t) return null;
+  if (t.includes('hemat')) return 'hemat';
+  if (t.includes('coding')) return 'coding';
+  if (t.includes('minimax')) return 'minimax';
+  if (/\bpro\b/.test(t)) return 'pro';
+  return null;
+}
+
+// Deteksi 2: probe minimal ke model eksklusif paket.
+// Aturan gateway: mimo-* / minimax-* ditolak 403 model_requires_package BILA tanpa paket.
+async function probePackage() {
+  try {
+    const res = await fetch(getBaseUrl() + '/chat/completions', {
+      method: 'POST',
+      headers: authHeaders(storedKey),
+      body: JSON.stringify({ model: 'mimo-v2.5', messages: [{ role: 'user', content: 'hi' }], max_tokens: 8, stream: false })
+    });
+    const text = await res.text();
+    if (res.ok) {
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch { /* bukan JSON */ }
+      const planRaw = parsed && (parsed.plan || parsed.package || parsed.billed_to ||
+        (parsed.billing && (parsed.billing.plan || parsed.billing.package)) ||
+        (parsed.usage && (parsed.usage.plan || parsed.usage.billing)));
+      const plan = packageFromText(typeof planRaw === 'string' ? planRaw : JSON.stringify(planRaw || ''));
+      return { hasPackage: true, plan };
+    }
+    if (/model_requires_package/i.test(text) || res.status === 403) return { hasPackage: false, plan: null };
+    return { hasPackage: null, plan: null };
+  } catch {
+    return { hasPackage: null, plan: null };
+  }
+}
+
+// Cache hasil deteksi 15 menit (probe berbiaya ~1 token).
+let accessCache = { at: 0, key: '', value: null };
+
+async function detectModelAccess() {
+  const s = readSettings();
+  const mode = s.modelAccessMode || 'auto';
+  if (mode !== 'auto') {
+    if (mode === 'payg') return { detected: true, source: 'mode', allowed: null, plan: 'Pay-as-you-go', note: 'Mode manual: Pay-as-you-go - semua model ditampilkan (biaya per pemakaian).' };
+    if (PACKAGE_MODELS[mode]) return { detected: true, source: 'mode', allowed: [...PACKAGE_MODELS[mode]], plan: PACKAGE_NAMES[mode], note: 'Mode manual: ' + PACKAGE_NAMES[mode] + ' - hanya ' + PACKAGE_MODELS[mode].length + ' model yang ditanggung paket.' };
+  }
+  if (!storedKey) return { detected: false, note: 'API key belum diisi.', allowed: null };
+  // Lapis 1: awalan key.
+  const byPrefix = packageFromKey(storedKey);
+  if (byPrefix) {
+    return {
+      detected: true, source: 'prefix', allowed: [...PACKAGE_MODELS[byPrefix]], plan: PACKAGE_NAMES[byPrefix],
+      note: 'API key terdeteksi: ' + PACKAGE_NAMES[byPrefix] + ' - model di luar daftar paket tidak ditampilkan agar saldo wallet tidak terpotong.'
+    };
+  }
+  // Lapis 2: cache.
+  const now = Date.now();
+  if (accessCache.value && accessCache.key === storedKey && now - accessCache.at < 15 * 60 * 1000) return accessCache.value;
+  // Lapis 3: probe ke server.
+  const probe = await probePackage();
+  let result;
+  if (probe.hasPackage === false) {
+    result = {
+      detected: true, source: 'probe', allowed: null, plan: 'Pay-as-you-go',
+      note: 'API key terdeteksi: Pay-as-you-go (tanpa paket) - semua model boleh, biaya per pemakaian.'
+    };
+  } else if (probe.hasPackage === true && probe.plan) {
+    result = {
+      detected: true, source: 'probe', allowed: [...PACKAGE_MODELS[probe.plan]], plan: PACKAGE_NAMES[probe.plan],
+      note: 'API key terdeteksi: ' + PACKAGE_NAMES[probe.plan] + ' - hanya model yang ditanggung paket yang ditampilkan.'
+    };
+  } else if (probe.hasPackage === true) {
+    result = {
+      detected: true, source: 'probe', allowed: [...PACKAGE_UNION], plan: 'Paket aktif',
+      note: 'Paket terdeteksi aktif (jenis belum terbaca) - menampilkan model yang umum ditanggung paket. Centang "Tampilkan semua model" bila perlu.'
+    };
+  } else {
+    result = {
+      detected: false, allowed: null,
+      note: 'Paket API key tidak dapat dideteksi otomatis - menampilkan semua model. Atur manual di Pengaturan - Model & paket API.'
+    };
+  }
+  // Jangan cache hasil yang tidak pasti (deteksi gagal) agar bisa dicoba ulang.
+  if (result.detected !== false) accessCache = { at: now, key: storedKey, value: result };
+  return result;
+}
+
+function blockedModelIds() {
+  try {
+    const s = readSettings();
+    return Array.isArray(s.modelBlocked) ? s.modelBlocked.map(String) : [];
+  } catch { return []; }
+}
+
+function addBlockedModel(model) {
+  try {
+    const s = readSettings();
+    const list = Array.isArray(s.modelBlocked) ? s.modelBlocked.map(String) : [];
+    if (!list.includes(String(model))) {
+      s.modelBlocked = [...list, String(model)].slice(0, 100);
+      writeSettings(s);
+    }
+  } catch { /* abaikan */ }
 }
 
 function authHeaders(key) {
@@ -865,7 +1103,7 @@ function findCommand(name, fallbacks) {
     if (candidate && fs.existsSync(candidate)) return candidate;
   }
   try {
-    const out = execFileSync('where.exe', [name], { windowsHide: true, encoding: 'utf8' });
+    const out = execFileSync('where.exe', [name], { windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     const match = out.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
     return match || null;
   } catch {
@@ -914,7 +1152,8 @@ function readRegistryValue(key, valueName) {
   try {
     const out = execFileSync('reg.exe', ['query', key, '/v', valueName], {
       windowsHide: true,
-      encoding: 'utf8'
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe']
     });
     const match = out.match(new RegExp(valueName + '\\s+\\S+\\s+(.+)'));
     return match ? match[1].trim() : null;
@@ -941,6 +1180,17 @@ function findWinFsp() {
   return null;
 }
 
+function findSshfs() {
+  const candidates = [
+    'C:\\Program Files\\SSHFS-Win\\bin\\sshfs-win.exe',
+    'C:\\Program Files (x86)\\SSHFS-Win\\bin\\sshfs-win.exe'
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 function iniEscape(value) {
   return String(value || '').replace(/[\"\\]/g, '\\$&').replace(/[\r\n]+/g, ' ');
 }
@@ -963,7 +1213,8 @@ function buildRcloneConfig(remoteName, payload, obscuredPass, obscuredKeyPass) {
 ipcMain.handle('drive:requirements', () => {
   const rclone = findRclone();
   const winfsp = findWinFsp();
-  return { ok: true, rclone: Boolean(rclone), winfsp: Boolean(winfsp), rclonePath: rclone || '', winfspPath: winfsp || '' };
+  const sshfs = findSshfs();
+  return { ok: true, rclone: Boolean(rclone), winfsp: Boolean(winfsp), sshfs: Boolean(sshfs), rclonePath: rclone || '', winfspPath: winfsp || '', sshfsPath: sshfs || '' };
 });
 
 ipcMain.handle('drive:installRclone', async () => {
@@ -1031,6 +1282,54 @@ ipcMain.handle('drive:map', async (event, payload) => {
       mappings.push({ drive, method: 'smb', unc, username: user, created: new Date().toISOString() });
       writeDriveMappings(mappings);
       return { ok: true, drive, message: out || ('Drive ' + drive + ': berhasil dipasang.') };
+    }
+
+    if (payload.method === 'sshfs') {
+      const host = String(payload.host || '').trim();
+      const user = String(payload.username || '').trim();
+      if (!host || !user) return { ok: false, error: 'Host dan username wajib diisi.' };
+      const password = String(payload.password || '');
+      const port = Number(payload.port) || 22;
+      const sshfsExe = findSshfs();
+      if (!sshfsExe) {
+        return { ok: false, error: 'SSHFS-Win tidak ditemukan. Install dari https://github.com/winfsp/sshfs-win/releases lalu coba lagi.' };
+      }
+      if (!findWinFsp()) {
+        return { ok: false, error: 'WinFsp tidak ditemukan. Install dari https://github.com/winfsp/winfsp/releases lalu coba lagi.' };
+      }
+      // Path absolute VPS (root) -> PATH di UNC (relatif terhadap /).
+      const cleanPath = remotePath.replace(/^[/\\]+|[/\\]+$/g, '').split(/[/\\]+/).filter(Boolean).join('\\');
+      // Tanpa password: key auth (.kr) memakai %USERPROFILE%\\.ssh\\id_rsa. Dengan password: auth password (.r).
+      const suffix = password ? 'r' : 'kr';
+      const prefix = '\\sshfs.' + suffix + '\\' + user + '@' + host + '!' + port + (cleanPath ? '\\' + cleanPath : '');
+      const args = ['svc', prefix, drive + ':'];
+      if (password) args.push('-o', 'password_stdin');
+      const result = spawnSync(sshfsExe, args, {
+        input: password ? password + '\n' : '',
+        windowsHide: true,
+        encoding: 'utf8',
+        timeout: 30000
+      });
+      if (result.error) return { ok: false, error: 'Gagal menjalankan SSHFS-Win: ' + result.error.message };
+      if (result.status !== 0) {
+        const detail = ((result.stderr || '') + '\n' + (result.stdout || '')).trim();
+        const hint = password
+          ? 'Cek host, port, dan password.'
+          : 'Tanpa password, SSHFS-Win memakai key %USERPROFILE%\\.ssh\\id_rsa (tanpa passphrase). Isi password SSH untuk auth password.';
+        return { ok: false, error: 'Gagal mount SSHFS-Win. ' + (detail ? detail.split('\n').filter(Boolean).slice(-1)[0] : hint) };
+      }
+      const mappings = readDriveMappings().filter((item) => item.drive !== drive);
+      mappings.push({
+        drive,
+        method: 'sshfs',
+        host,
+        port,
+        username: user,
+        remotePath,
+        created: new Date().toISOString()
+      });
+      writeDriveMappings(mappings);
+      return { ok: true, drive, message: 'Drive ' + drive + ': berhasil dipasang (SSHFS-Win).' };
     }
 
     if (payload.method !== 'rclone') return { ok: false, error: 'Metode tidak dikenal.' };
@@ -1161,6 +1460,199 @@ ipcMain.handle('drive:unmap', async (event, driveInput) => {
   }
 });
 
+// ---------- Menu bar ala VS Code (File / Edit / View / Terminal / Help) ----------
+let openTerminals = []; // diset renderer via menu:syncTerminals
+
+function sendToRenderer(channel, payload) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
+  }
+}
+
+function buildAppMenu() {
+  const tabs = openTerminals;
+  const terminalTabItems = tabs.length
+    ? tabs.map((t) => ({
+        label: (t.kind === 'ssh' ? 'SSH · ' : 'Lokal · ') + t.label,
+        type: 'radio',
+        checked: Boolean(t.active),
+        click: () => sendToRenderer('menu:event', { action: 'focusTerminal', uid: t.uid }),
+      }))
+    : [{ label: '(tidak ada terminal)', enabled: false }];
+
+  const template = [
+    {
+      label: 'File',
+      submenu: [
+        { label: 'Open Folder…', accelerator: 'Ctrl+K Ctrl+O', click: () => sendToRenderer('menu:event', { action: 'openFolder' }) },
+        { label: 'Clone Repository…', click: () => sendToRenderer('menu:event', { action: 'cloneRepo' }) },
+        { type: 'separator' },
+        { label: 'Save File', accelerator: 'Ctrl+S', click: () => sendToRenderer('menu:event', { action: 'save' }) },
+        { type: 'separator' },
+        { role: 'quit', label: 'Keluar' },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo', label: 'Undo' },
+        { role: 'redo', label: 'Redo' },
+        { type: 'separator' },
+        { role: 'cut', label: 'Cut' },
+        { role: 'copy', label: 'Copy' },
+        { role: 'paste', label: 'Paste' },
+        { role: 'selectAll', label: 'Select All' },
+        { type: 'separator' },
+        { label: 'Panduan Shortcut Chat', accelerator: 'Ctrl+Alt+H', click: () => sendToRenderer('menu:event', { action: 'shortcutGuide' }) },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { label: 'Chat', click: () => sendToRenderer('menu:event', { action: 'view', view: 'chat' }) },
+        { label: 'Workspace Developer', click: () => sendToRenderer('menu:event', { action: 'view', view: 'workspace' }) },
+        { label: 'Models', click: () => sendToRenderer('menu:event', { action: 'view', view: 'models' }) },
+        { label: 'API & Snippet', click: () => sendToRenderer('menu:event', { action: 'view', view: 'api' }) },
+        { label: 'Extensions', click: () => sendToRenderer('menu:event', { action: 'view', view: 'extensions' }) },
+        { type: 'separator' },
+        { label: 'Toggle Sidebar (Explorer)', accelerator: 'Ctrl+B', click: () => sendToRenderer('menu:event', { action: 'toggleSidebar' }) },
+        { label: 'Toggle Agent Panel', accelerator: 'Ctrl+J', click: () => sendToRenderer('menu:event', { action: 'toggleAgent' }) },
+        { label: 'Toggle Terminal', accelerator: 'Ctrl+`', click: () => sendToRenderer('menu:event', { action: 'toggleTerminal' }) },
+        { type: 'separator' },
+        { role: 'reload', label: 'Reload Window' },
+      ],
+    },
+    {
+      label: 'Terminal',
+      submenu: [
+        { label: 'New Terminal', accelerator: 'Ctrl+`', click: () => sendToRenderer('menu:event', { action: 'newTerminal' }) },
+        { label: 'Split Terminal', accelerator: 'Ctrl+Shift+5', click: () => sendToRenderer('menu:event', { action: 'splitTerminal' }) },
+        { type: 'separator' },
+        { label: 'Run Active File', accelerator: 'Ctrl+Alt+R', click: () => sendToRenderer('menu:event', { action: 'runActiveFile' }) },
+        { label: 'Run Selected Text', accelerator: 'Ctrl+Alt+N', click: () => sendToRenderer('menu:event', { action: 'runSelectedText' }) },
+        { type: 'separator' },
+        { label: 'Kill Terminal', accelerator: 'Ctrl+Shift+K', click: () => sendToRenderer('menu:event', { action: 'killTerminal' }) },
+        { label: 'Clear Terminal', click: () => sendToRenderer('menu:event', { action: 'clearTerminal' }) },
+        { label: 'Close Terminal Panel', click: () => sendToRenderer('menu:event', { action: 'closeTerminalPanel' }) },
+        { type: 'separator' },
+        ...terminalTabItems,
+      ],
+    },
+    {
+      label: 'Help',
+      submenu: [
+        { label: 'Tentang SahabatMobile', click: () => sendToRenderer('menu:event', { action: 'about' }) },
+        { type: 'separator' },
+        { label: 'Website SahabatMobile', click: () => shell.openExternal('https://www.sahabatmobile.com') },
+        { label: 'Dokumentasi', click: () => shell.openExternal('https://www.sahabatmobile.com/docs') },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+ipcMain.on('menu:syncTerminals', (event, list) => {
+  openTerminals = (Array.isArray(list) ? list : []).slice(0, 12).map((t) => ({
+    uid: String((t && t.uid) || ''),
+    label: String((t && t.label) || '').slice(0, 60),
+    kind: (t && t.kind === 'ssh') ? 'ssh' : 'local',
+    active: Boolean(t && t.active),
+  })).filter((t) => t.uid);
+  buildAppMenu();
+});
+
+// ---------- database connections (MySQL/MariaDB, PostgreSQL, SQLite, SQL Server, MongoDB, Redis, Elasticsearch) ----------
+const dbSessions = new Map();
+let dbSeq = 0;
+
+function mustDbSession(id) {
+  const s = dbSessions.get(String(id || ''));
+  if (!s) throw new Error('Sesi database tidak ditemukan atau sudah diputus.');
+  return s;
+}
+
+function dbLabel(p) {
+  const kind = normalizeProfileProtocol(p.protocol || p.kind);
+  if (kind === 'sqlite') return 'SQLITE · ' + path.basename(p.filePath || '');
+  const user = p.user || p.username || '';
+  return kind.toUpperCase() + ' · ' + (user ? user + '@' : '') + (p.host || '') + ':' + (Number(p.port) || defaultPortOf(kind));
+}
+
+function dbWrap(run) {
+  return async (event, payload) => {
+    try {
+      return await run(payload || {});
+    } catch (err) {
+      return { ok: false, error: (err && err.message) ? err.message : String(err) };
+    }
+  };
+}
+
+ipcMain.handle('db:connect', dbWrap(async (cfg) => {
+  cfg = cfg || {};
+  const kind = normalizeProfileProtocol(cfg.protocol || cfg.kind);
+  if (!dbEngine.isDbProtocol(kind)) throw new Error('Tipe koneksi tidak didukung: ' + (cfg.protocol || ''));
+  // Hubungkan ulang profil tersimpan (untuk target dropdown).
+  if (cfg.connectionId) {
+    const profile = readConnectionProfile(String(cfg.connectionId));
+    if (!profile) throw new Error('Koneksi tersimpan tidak ditemukan.');
+    const session = await dbEngine.createSession(profile);
+    const id = 'db' + (++dbSeq);
+    dbSessions.set(id, session);
+    updateConnectionLastConnected(profile.id);
+    return { ok: true, id, type: 'db', label: dbLabel(profile), protocol: profile.protocol, host: profile.host, port: profile.port, username: profile.username, savedId: profile.id };
+  }
+  const session = await dbEngine.createSession({ ...cfg, kind });
+  const id = 'db' + (++dbSeq);
+  dbSessions.set(id, session);
+  let saved = null;
+  if (cfg.saveConnection) saved = saveConnectionProfile({ ...cfg, protocol: kind, port: Number(cfg.port) || defaultPortOf(kind) });
+  return {
+    ok: true, id, type: 'db',
+    label: dbLabel({ ...cfg, protocol: kind, port: Number(cfg.port) || defaultPortOf(kind) }),
+    protocol: kind, host: cfg.host, port: Number(cfg.port) || defaultPortOf(kind), username: cfg.user || cfg.username || '',
+    savedId: saved ? saved.id : undefined,
+  };
+}));
+
+ipcMain.handle('db:disconnect', dbWrap(async (payload) => {
+  const id = String(payload.id || '');
+  const s = dbSessions.get(id);
+  if (s) { try { await dbEngine.closeSession(s); } catch {} dbSessions.delete(id); }
+  return { ok: true };
+}));
+
+ipcMain.handle('db:listDatabases', dbWrap(async (payload) => dbEngine.listDatabases(mustDbSession(payload.id))));
+
+ipcMain.handle('db:listTables', dbWrap(async (payload) => dbEngine.listTables(mustDbSession(payload.id), payload.database)));
+
+ipcMain.handle('db:runQuery', dbWrap(async (payload) => dbEngine.runQuery(mustDbSession(payload.id), payload.database, payload.sql)));
+
+ipcMain.handle('db:redisValue', dbWrap(async (payload) => dbEngine.redisKeyValue(mustDbSession(payload.id), String(payload.key || ''))));
+
+ipcMain.handle('dialog:openFile', async (event, options) => {
+  const opts = options || {};
+  const result = await dialog.showOpenDialog({
+    title: opts.title || 'Pilih file',
+    properties: ['openFile'],
+    filters: Array.isArray(opts.filters) && opts.filters.length ? opts.filters : [{ name: 'Semua file', extensions: ['*'] }],
+  });
+  if (result.canceled || !result.filePaths.length) return { ok: false, cancelled: true };
+  return { ok: true, path: result.filePaths[0] };
+});
+
+ipcMain.handle('dialog:saveCsv', async (event, payload) => {
+  const content = String((payload && payload.content) || '');
+  const result = await dialog.showSaveDialog({
+    title: 'Export CSV',
+    defaultPath: (payload && payload.defaultPath) || 'export.csv',
+    filters: [{ name: 'CSV', extensions: ['csv'] }],
+  });
+  if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
+  fs.writeFileSync(result.filePath, content, 'utf8');
+  return { ok: true, path: result.filePath };
+});
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1380,
@@ -1191,6 +1683,23 @@ function createWindow() {
           fs.rmSync(tf, { recursive: true, force: true });
           fs.mkdirSync(path.join(tf, 'sub'), { recursive: true });
           fs.writeFileSync(path.join(tf, 'a.txt'), 'data-a');
+          const smokeProfileId = 'smoke-edit-conn';
+          const smokeSettings = readSettings();
+          const smokeConnections = Array.isArray(smokeSettings.connections) ? smokeSettings.connections : [];
+          smokeSettings.connections = smokeConnections.filter((p) => p.id !== smokeProfileId);
+          smokeSettings.connections.push({
+            id: smokeProfileId,
+            name: 'Smoke Edit',
+            protocol: 'sftp',
+            host: '127.0.0.1',
+            port: 22,
+            username: 'smoke',
+            authType: 'password',
+            privateKey: '',
+            password: encryptSecret('secret'),
+            lastConnected: null
+          });
+          writeSettings(smokeSettings);
           const result = await win.webContents.executeJavaScript(`(async () => {
             const out = {};
             out.ace = typeof window.ace;
@@ -1268,6 +1777,10 @@ function createWindow() {
             out.treeMenu = Array.from(document.querySelectorAll('#contextMenu .context-item')).map(b => b.textContent);
             document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
             out.mapModal = !!document.querySelector('#mapModal');
+            out.mapMethodDefault = (document.querySelector('#mapMethod') || {}).value || '';
+            out.mapInstallSshfs = !!document.querySelector('#mapInstallSshfs');
+            out.dbProtocolOptions = document.querySelectorAll('#connProtocol option').length;
+            out.dbApis = ['dbConnect','dbDisconnect','dbListDatabases','dbListTables','dbRunQuery','dbRedisValue'].map(k => typeof window.sahabat[k]).join(',');
             out.mapRoot = !!document.querySelector('#mapRoot');
             out.mapDriveTop = !!document.querySelector('#mapDriveTop');
             out.connectionsModal = !!document.querySelector('#connectionsModal');
@@ -1276,7 +1789,7 @@ function createWindow() {
             out.savedConnectionsButton = !!document.querySelector('#savedConnections');
             out.savedTargetOptions = document.querySelectorAll('#targetSelect optgroup[label="Tersimpan"] option').length;
             const mapRequirements = await window.sahabat.mapRequirements();
-            out.mapRequirements = { rclone: mapRequirements.rclone, winfsp: mapRequirements.winfsp };
+            out.mapRequirements = { rclone: mapRequirements.rclone, winfsp: mapRequirements.winfsp, sshfs: mapRequirements.sshfs };
             const savedList = await window.sahabat.listConnections();
             out.savedList = savedList.ok ? savedList.connections.length : -1;
             const missingSaved = await window.sahabat.connectSaved('smoke-missing-id');
@@ -1285,6 +1798,24 @@ function createWindow() {
             out.smbValidationError = smbValidation.error || '';
             out.uploadApi = typeof window.sahabat.uploadEntry;
             out.downloadApi = typeof window.sahabat.downloadEntry;
+            out.chatAttach = !!document.querySelector('#attachChat');
+            out.newChatButton = !!document.querySelector('#newChat');
+            out.updateBadge = !!document.querySelector('#updateBadge');
+            out.updateApi = typeof window.sahabat.checkUpdate;
+            out.connectionEditApi = typeof window.sahabat.updateConnection + '/' + typeof window.sahabat.getConnection;
+            out.connectionEditUi = !!document.querySelector('#connSaveOnly') + '/' + !!document.querySelector('#editConnectionTop');
+            const missingConn = await window.sahabat.getConnection('smoke-missing-id');
+            out.missingConnError = missingConn.error || '';
+            const upd = await window.sahabat.checkUpdate();
+            out.update = { ok: upd.ok, noFeed: !!upd.noFeed, current: upd.current, hasUpdate: !!upd.hasUpdate };
+            const connGet = await window.sahabat.getConnection('smoke-edit-conn');
+            out.connEditGet = { ok: connGet.ok, name: connGet.connection && connGet.connection.name, hasPassword: !!(connGet.connection && connGet.connection.hasPassword) };
+            const connUpd = await window.sahabat.updateConnection({ id: 'smoke-edit-conn', protocol: 'sftp', name: 'Smoke Edited', host: '127.0.0.2', port: 2222, username: 'smoke2', authType: 'password', privateKey: '', password: '' });
+            out.connEditUpdate = { ok: connUpd.ok, name: connUpd.connection && connUpd.connection.name, host: connUpd.connection && connUpd.connection.host, port: connUpd.connection && connUpd.connection.port };
+            const connAfter = await window.sahabat.getConnection('smoke-edit-conn');
+            out.connEditKeptPassword = !!(connAfter.connection && connAfter.connection.hasPassword);
+            const connRemove = await window.sahabat.removeConnection('smoke-edit-conn');
+            out.connEditRemoved = connRemove.ok;
             out.mapApi = typeof window.sahabat.mapDrive;
             out.unmapApi = typeof window.sahabat.unmapDrive;
             out.clipboardApi = typeof window.sahabat.readClipboard;
@@ -1729,6 +2260,7 @@ async function fastRename(srcSession, srcPath, dstSession, dstPath) {
 
 app.whenReady().then(() => {
   storedKey = loadKey();
+  buildAppMenu();
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -1742,17 +2274,156 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   for (const child of terminals.values()) { try { child.kill(); } catch {} }
   for (const s of remotes.values()) { try { s.client.end ? s.client.end() : s.client.close(); } catch {} }
+  for (const s of dbSessions.values()) { dbEngine.closeSession(s).catch(() => {}); }
 });
 
-ipcMain.handle('settings:get', () => ({
-  baseUrl: getBaseUrl(),
-  hasKey: Boolean(storedKey),
-  keyHint: maskKey(storedKey)
-}));
+ipcMain.handle('settings:get', () => {
+  const s = readSettings();
+  return {
+    baseUrl: getBaseUrl(),
+    hasKey: Boolean(storedKey),
+    keyHint: maskKey(storedKey),
+    version: app.getVersion(),
+    updateFeed: s.updateFeed || DEFAULT_UPDATE_FEED,
+    autoUpdate: s.autoUpdate !== false,
+    agentThinking: ['default', 'low', 'mid', 'high', 'xhigh'].includes(s.agentThinking) ? s.agentThinking : 'default',
+    modelAccessMode: ['auto', 'payg', 'hemat', 'coding', 'minimax', 'pro'].includes(s.modelAccessMode) ? s.modelAccessMode : 'auto',
+    modelAccessAll: s.modelAccessAll === true,
+    modelBlockedCount: Array.isArray(s.modelBlocked) ? s.modelBlocked.length : 0
+  };
+});
 
 ipcMain.handle('settings:copyKey', () => {
   if (!storedKey) return { ok: false };
   clipboard.writeText(storedKey);
+  return { ok: true };
+});
+
+// ---------- Auto-update ----------
+
+function normalizeReleaseVersion(value) {
+  return String(value || '').trim().replace(/^v/i, '');
+}
+
+function pickUpdateAsset(release) {
+  const assets = Array.isArray(release.assets) ? release.assets : [];
+  const patterns = {
+    win32: /\.exe$/i,
+    darwin: /\.dmg$/i,
+    linux: /\.(appimage|deb)$/i
+  };
+  const re = patterns[process.platform] || patterns.win32;
+  const asset = assets.find((a) => re.test(a.name || a.browser_download_url || ''));
+  return asset ? (asset.browser_download_url || asset.url || '') : '';
+}
+
+function parseUpdateFeed(data) {
+  if (!data || typeof data !== 'object') throw new Error('Format feed tidak dikenali.');
+  if (data.version || data.url) {
+    return {
+      version: normalizeReleaseVersion(data.version),
+      url: String(data.url || ''),
+      notes: String(data.notes || data.changelog || ''),
+      mandatory: Boolean(data.mandatory)
+    };
+  }
+  const tag = data.tag_name || data.name;
+  if (tag) {
+    return {
+      version: normalizeReleaseVersion(tag),
+      url: pickUpdateAsset(data),
+      notes: String(data.body || ''),
+      mandatory: false
+    };
+  }
+  throw new Error('Feed tidak memuat "version" atau "tag_name".');
+}
+
+ipcMain.handle('app:version', () => ({
+  version: app.getVersion(),
+  platform: process.platform,
+  electron: process.versions.electron
+}));
+
+ipcMain.handle('update:check', async () => {
+  const current = app.getVersion();
+  const feed = String(readSettings().updateFeed || DEFAULT_UPDATE_FEED).trim();
+  try {
+    const text = await fetchTextOnce(feed, 15000);
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error('Feed bukan JSON valid.');
+    }
+    const info = parseUpdateFeed(data);
+    if (!info.version) throw new Error('Versi terbaru tidak ada di feed.');
+    return {
+      ok: true,
+      current,
+      latest: info.version,
+      hasUpdate: compareVersions(info.version, current) > 0,
+      url: info.url,
+      notes: info.notes,
+      mandatory: info.mandatory,
+      feed
+    };
+  } catch (err) {
+    const noFeed = /HTTP 404|HTTP 403|HTTP 401/.test(String(err.message || ''));
+    if (noFeed) {
+      return { ok: true, current, latest: '', hasUpdate: false, url: '', notes: '', mandatory: false, feed, noFeed: true };
+    }
+    return { ok: false, current, feed, error: 'Gagal cek pembaruan: ' + err.message };
+  }
+});
+
+ipcMain.handle('update:download', async (event, payload) => {
+  const url = String((payload && payload.url) || '').trim();
+  if (!/^https?:\/\//i.test(url)) return { ok: false, error: 'URL unduhan tidak valid.' };
+  let name = 'SahabatMobile-Desktop-update.exe';
+  try {
+    const parsed = new URL(url);
+    name = decodeURIComponent((parsed.pathname.split('/').pop() || name));
+  } catch {}
+  name = name.replace(/[^a-zA-Z0-9._-]/g, '_') || 'update.exe';
+  const dir = path.join(app.getPath('temp'), 'sahabat-update');
+  const target = path.join(dir, name);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const res = await fetch(url, { headers: { 'User-Agent': 'SahabatMobile-Desktop/1.0' } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const total = Number(res.headers.get('content-length') || 0);
+    const sender = event.sender;
+    let received = 0;
+    const out = fs.createWriteStream(target);
+    await new Promise((resolve, reject) => {
+      const body = Readable.fromWeb(res.body);
+      body.on('data', (chunk) => {
+        received += chunk.length;
+        try {
+          sender.send('update:progress', {
+            received,
+            total,
+            percent: total ? Math.round((received / total) * 100) : 0
+          });
+        } catch {}
+      });
+      body.on('error', reject);
+      out.on('error', reject);
+      out.on('finish', resolve);
+      body.pipe(out);
+    });
+    return { ok: true, path: target, name, size: received };
+  } catch (err) {
+    return { ok: false, error: 'Gagal mengunduh update: ' + err.message };
+  }
+});
+
+ipcMain.handle('update:install', async (event, filePath) => {
+  const target = String(filePath || '');
+  if (!target || !fs.existsSync(target)) return { ok: false, error: 'File update tidak ditemukan.' };
+  const err = await shell.openPath(target);
+  if (err) return { ok: false, error: err };
   return { ok: true };
 });
 
@@ -1768,11 +2439,42 @@ ipcMain.handle('settings:set', (event, payload) => {
   if (payload.baseUrl && payload.baseUrl.trim()) {
     data.baseUrl = payload.baseUrl.trim().replace(/\/+$/, '');
   }
+  if (typeof payload.updateFeed === 'string' && payload.updateFeed.trim()) {
+    data.updateFeed = payload.updateFeed.trim();
+  }
+  if (typeof payload.autoUpdate === 'boolean') {
+    data.autoUpdate = payload.autoUpdate;
+  }
+  if (typeof payload.modelAccessMode === 'string' && ['auto', 'payg', 'hemat', 'coding', 'minimax', 'pro'].includes(payload.modelAccessMode)) {
+    data.modelAccessMode = payload.modelAccessMode;
+  }
+  if (typeof payload.modelAccessAll === 'boolean') {
+    data.modelAccessAll = payload.modelAccessAll;
+  }
+  if (payload.resetBlockedModels === true) {
+    data.modelBlocked = [];
+  }
+  if (typeof payload.agentThinking === 'string') {
+    const v = payload.agentThinking.toLowerCase();
+    if (['default', 'low', 'mid', 'high', 'xhigh'].includes(v)) data.agentThinking = v;
+  }
   writeSettings(data);
   if (payload.apiKey && payload.apiKey.trim()) {
     saveKey(payload.apiKey.trim());
   }
-  return { baseUrl: getBaseUrl(), hasKey: Boolean(storedKey), keyHint: maskKey(storedKey) };
+  const s = readSettings();
+  return {
+    baseUrl: getBaseUrl(),
+    hasKey: Boolean(storedKey),
+    keyHint: maskKey(storedKey),
+    version: app.getVersion(),
+    updateFeed: s.updateFeed || DEFAULT_UPDATE_FEED,
+    autoUpdate: s.autoUpdate !== false,
+    agentThinking: ['default', 'low', 'mid', 'high', 'xhigh'].includes(s.agentThinking) ? s.agentThinking : 'default',
+    modelAccessMode: ['auto', 'payg', 'hemat'].includes(s.modelAccessMode) ? s.modelAccessMode : 'auto',
+    modelAccessAll: s.modelAccessAll === true,
+    modelBlockedCount: Array.isArray(s.modelBlocked) ? s.modelBlocked.length : 0
+  };
 });
 
 ipcMain.handle('models:list', async () => {
@@ -1785,9 +2487,27 @@ ipcMain.handle('models:list', async () => {
     const list = (parsed.data || []).map((m) => ({
       id: m.id,
       name: m.name || m.id,
-      owner: m.owned_by || ''
+      owner: m.owned_by || '',
+      thinking: modelSupportsThinking(m.id)
     })).sort((a, b) => a.id.localeCompare(b.id));
-    return { ok: true, models: list };
+    const s = readSettings();
+    const blocked = blockedModelIds();
+    let shown = list;
+    let access;
+    if (!s.modelAccessAll) {
+      access = await detectModelAccess();
+      if (access.allowed) {
+        const allow = new Set(access.allowed.map((id) => String(id).toLowerCase()));
+        shown = shown.filter((m) => allow.has(String(m.id).toLowerCase()));
+      }
+      if (blocked.length) shown = shown.filter((m) => !blocked.includes(String(m.id)));
+    } else {
+      access = { detected: true, source: 'mode', allowed: null, note: 'Menampilkan semua model (filter paket dimatikan).' };
+    }
+    const hidden = list.length - shown.length;
+    const accessOut = { ...access, total: list.length, shown: shown.length, hidden, blockedCount: blocked.length };
+    if (hidden) accessOut.note = (access.note || 'Model sesuai paket Anda.') + ' ' + hidden + ' model disembunyikan.';
+    return { ok: true, models: shown, total: list.length, access: accessOut, blockedCount: blocked.length };
   } catch (err) {
     return { ok: false, error: { message: 'Gagal menghubungi server: ' + err.message } };
   }
@@ -1887,11 +2607,40 @@ ipcMain.handle('chat:abort', (event, requestId) => {
   return { ok: true };
 });
 
+function completionFromParsed(parsed) {
+  const choice = (parsed.choices && parsed.choices[0]) || null;
+  const message = (choice && choice.message) || { role: 'assistant', content: '' };
+  const rawContent = String(message.content || '');
+  let reasoning = '';
+  if (message.reasoning_content) reasoning = String(message.reasoning_content);
+  else if (message.reasoning) reasoning = String(message.reasoning);
+  else if (message.thinking) reasoning = String(message.thinking);
+  else {
+    const m = rawContent.match(/<think>([\s\S]*?)<\/think>/i);
+    if (m) reasoning = m[1].trim();
+  }
+  const thinkMatch = rawContent.match(/<think>([\s\S]*?)<\/think>/i);
+  const cleanContent = thinkMatch ? rawContent.replace(thinkMatch[0], '').trim() : rawContent;
+  return {
+    ok: true,
+    message: { ...stripReasoningFields(message), content: cleanContent },
+    reasoning,
+    finishReason: choice && choice.finish_reason,
+    usage: parsed.usage || null,
+  };
+}
+
+// ---------- Chat completion dengan pembatalan (AbortController) ----------
+const chatControllers = new Map();
+let chatSeq = 0;
+
 ipcMain.handle('chat:complete', async (event, payload) => {
   if (!storedKey) return { ok: false, error: { message: 'API key belum diisi.' } };
+  const model = String(payload.model || '');
+  const capable = modelSupportsThinking(model);
   const body = {
-    model: payload.model,
-    messages: payload.messages,
+    model,
+    messages: stripReasoningFromMessages(payload.messages),
     stream: false,
     temperature: typeof payload.temperature === 'number' ? payload.temperature : 0.3,
     max_tokens: payload.maxTokens || 4096
@@ -1900,25 +2649,72 @@ ipcMain.handle('chat:complete', async (event, payload) => {
     body.tools = payload.tools;
     body.tool_choice = 'auto';
   }
-  try {
-    const res = await fetch(getBaseUrl() + '/chat/completions', {
-      method: 'POST',
-      headers: authHeaders(storedKey),
-      body: JSON.stringify(body)
-    });
-    const text = await res.text();
-    if (!res.ok) return { ok: false, error: errorMessage(res.status, text) };
-    const parsed = JSON.parse(text);
-    const choice = (parsed.choices && parsed.choices[0]) || null;
-    return {
-      ok: true,
-      message: (choice && choice.message) || { role: 'assistant', content: '' },
-      finishReason: choice && choice.finish_reason,
-      usage: parsed.usage || null
-    };
-  } catch (err) {
-    return { ok: false, error: { message: 'Koneksi gagal: ' + err.message } };
+  // Thinking (reasoning effort) — hanya dikirim jika model terdeteksi support.
+  const THINKING_MAP = { low: 'low', mid: 'medium', high: 'high', xhigh: 'xhigh' };
+  const think = String(payload.reasoningEffort || '').toLowerCase();
+  if (capable && Object.prototype.hasOwnProperty.call(THINKING_MAP, think)) {
+    body.reasoning_effort = THINKING_MAP[think];
   }
+  const requestId = String(payload.requestId || ('c' + (++chatSeq)));
+  const controller = new AbortController();
+  chatControllers.set(requestId, controller);
+  // Rantai percobaan: penuh → tanpa reasoning_effort → tanpa tools.
+  // Gateway kadang menolak param dengan error umum ("Terjadi kesalahan internal"),
+  // jadi recovery tidak boleh bergantung pada teks error.
+  const attempts = [{ body, toolsStripped: false, reasoningStripped: false }];
+  if (body.reasoning_effort) {
+    const b = { ...body };
+    delete b.reasoning_effort;
+    attempts.push({ body: b, toolsStripped: false, reasoningStripped: true });
+  }
+  let lastStatus = 0;
+  let lastText = '';
+  try {
+    for (let i = 0; i < attempts.length; i += 1) {
+      const attempt = attempts[i];
+      const res = await fetch(getBaseUrl() + '/chat/completions', {
+        method: 'POST',
+        headers: authHeaders(storedKey),
+        body: JSON.stringify(attempt.body),
+        signal: controller.signal
+      });
+      if (res.ok) {
+        const out = completionFromParsed(JSON.parse(await res.text()));
+        if (attempt.reasoningStripped) out.note = 'Thinking diabaikan — model/gateway menolak parameter reasoning.';
+        if (attempt.toolsStripped) out.toolsDisabled = true;
+        return out;
+      }
+      const text = await res.text();
+      lastStatus = res.status;
+      lastText = text;
+      // Varian terakhir: tanpa tools (hanya jika error menyebut tool/function).
+      const isToolErr = /tool|function|model_no_tool/i.test(text);
+      const isGeneric = res.status >= 500 || /internal|kesalahan/i.test(text);
+      if (attempt.body.tools && isToolErr && i === attempts.length - 1) {
+        const b = { ...attempt.body };
+        delete b.tools;
+        delete b.tool_choice;
+        attempts.push({ body: b, toolsStripped: true, reasoningStripped: attempt.reasoningStripped });
+        continue;
+      }
+      // Error lain yang tidak berkaitan param → berhenti, jangan retry percuma.
+      if (!isToolErr && !isGeneric && !attempt.reasoningStripped) break;
+    }
+    return { ok: false, error: errorMessage(lastStatus, lastText) };
+  } catch (err) {
+    if (err && (err.name === 'AbortError' || controller.signal.aborted)) {
+      return { ok: false, aborted: true, error: { message: 'Dihentikan oleh pengguna.' } };
+    }
+    return { ok: false, error: { message: 'Koneksi gagal: ' + err.message } };
+  } finally {
+    chatControllers.delete(requestId);
+  }
+});
+
+ipcMain.handle('chat:cancel', (event, requestId) => {
+  const c = chatControllers.get(String(requestId || ''));
+  if (c) { c.abort(); return { ok: true }; }
+  return { ok: false };
 });
 
 ipcMain.handle('dialog:openFolder', async (event) => {
@@ -2309,6 +3105,32 @@ ipcMain.handle('connections:remove', (event, id) => {
   }
 });
 
+ipcMain.handle('connections:get', (event, id) => {
+  const s = readSettings();
+  const list = Array.isArray(s.connections) ? s.connections : [];
+  const profile = list.find((p) => p.id === id);
+  if (!profile) return { ok: false, error: 'Koneksi tersimpan tidak ditemukan.' };
+  return {
+    ok: true,
+    connection: {
+      ...connectionPublic(profile),
+      privateKey: profile.privateKey || ''
+    }
+  };
+});
+
+ipcMain.handle('connections:update', (event, payload) => {
+  try {
+    const id = String((payload && payload.id) || '');
+    if (!id) return { ok: false, error: 'ID koneksi tidak valid.' };
+    const result = updateConnectionProfile(id, payload || {});
+    if (!result.ok) return result;
+    return { ok: true, connection: result.connection };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 ipcMain.handle('remote:listDir', async (event, payload) => {
   try {
     const session = getRemote(payload.id);
@@ -2357,20 +3179,29 @@ ipcMain.handle('remote:remove', async (event, payload) => {
   }
 });
 
+// ---------- remote shell (multi-stream per sesi SSH) ----------
+let shellSeq = 0;
+
 ipcMain.handle('remote:shell', async (event, payload) => {
   try {
     const s = getRemote(payload.id);
     if (s.type !== 'ssh') return { ok: false, error: 'FTP tidak mendukung terminal.' };
-    if (s.shell) return { ok: true };
+    const cols = Math.max(20, Math.min(500, Number(payload.cols) || 120));
+    const rows = Math.max(5, Math.min(200, Number(payload.rows) || 30));
     const stream = await new Promise((resolve, reject) => {
-      s.client.shell({ term: 'xterm-256color', cols: payload.cols || 120, rows: payload.rows || 30 }, (err, st) => (err ? reject(err) : resolve(st)));
+      s.client.shell({ term: 'xterm-256color', cols, rows }, (err, st) => (err ? reject(err) : resolve(st)));
     });
+    const shellId = 'sh' + (++shellSeq);
+    if (!s.shells) s.shells = new Map();
     stream.setEncoding('utf8');
-    stream.on('data', (d) => send('remote:data', { id: payload.id, data: d }));
-    stream.stderr.on('data', (d) => send('remote:data', { id: payload.id, data: d }));
-    stream.on('close', () => send('remote:exit', { id: payload.id }));
-    s.shell = stream;
-    return { ok: true };
+    stream.on('data', (d) => send('remote:data', { id: payload.id, shellId, data: d }));
+    if (stream.stderr) stream.stderr.on('data', (d) => send('remote:data', { id: payload.id, shellId, data: d }));
+    stream.on('close', () => {
+      if (s.shells) s.shells.delete(shellId);
+      send('remote:exit', { id: payload.id, shellId });
+    });
+    s.shells.set(shellId, stream);
+    return { ok: true, shellId };
   } catch (err) {
     return { ok: false, error: err.message };
   }
@@ -2378,20 +3209,34 @@ ipcMain.handle('remote:shell', async (event, payload) => {
 
 ipcMain.handle('remote:input', (event, payload) => {
   const s = remotes.get(payload.id);
-  if (s && s.shell) s.shell.write(String(payload.data || ''));
-  return { ok: Boolean(s && s.shell) };
+  const stream = s && s.shells && s.shells.get(String(payload.shellId));
+  if (stream) stream.write(String(payload.data || ''));
+  return { ok: Boolean(stream) };
 });
 
 ipcMain.handle('remote:resize', (event, payload) => {
   const s = remotes.get(payload.id);
-  if (s && s.shell) s.shell.setWindow(payload.rows || 30, payload.cols || 120, 0, 0);
-  return { ok: Boolean(s && s.shell) };
+  const stream = s && s.shells && s.shells.get(String(payload.shellId));
+  if (stream) stream.setWindow(payload.rows || 30, payload.cols || 120, 0, 0);
+  return { ok: Boolean(stream) };
+});
+
+ipcMain.handle('remote:closeShell', (event, payload) => {
+  const s = remotes.get(payload.id);
+  const shellId = String(payload.shellId || '');
+  const stream = s && s.shells && s.shells.get(shellId);
+  if (stream) { try { stream.end(); } catch {} }
+  if (s && s.shells) s.shells.delete(shellId);
+  return { ok: true };
 });
 
 ipcMain.handle('remote:disconnect', (event, id) => {
   const s = remotes.get(id);
   if (s) {
-    try { if (s.shell) s.shell.end(); } catch {}
+    if (s.shells) {
+      for (const stream of s.shells.values()) { try { stream.end(); } catch {} }
+      s.shells.clear();
+    } else if (s.shell) { try { s.shell.end(); } catch {} }
     try { if (s.type === 'ssh') s.client.end(); else s.client.close(); } catch {}
     remotes.delete(id);
   }
@@ -2454,7 +3299,7 @@ ipcMain.handle('agent:runCommand', async (event, payload) => {
   const ctx = resolveAgentTarget(payload.target);
   const win = BrowserWindow.fromWebContents(event.sender);
   const where = ctx.kind === 'remote' ? (ctx.type === 'ssh' ? 'server SSH' : 'server FTP (tidak didukung)') : 'folder lokal';
-  if (!allowAgentCommands) {
+  if (!allowAgentCommands && !payload.allow) {
     const answer = await dialog.showMessageBox(win, {
       type: 'warning',
       buttons: ['Jalankan', 'Batal'],

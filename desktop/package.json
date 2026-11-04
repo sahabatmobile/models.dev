@@ -1,6 +1,6 @@
 {
   "name": "sahabat-desktop",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Aplikasi desktop AI Gateway SahabatMobile",
   "main": "main.js",
   "author": "SahabatMobile",
@@ -26,17 +26,12 @@
       "index.html",
       "renderer.js",
       "styles.css",
+      "db.js",
       "package.json",
       "extensions/**/*",
       "vendor/**/*",
-      "node_modules/ssh2/**/*",
-      "node_modules/asn1/**/*",
-      "node_modules/bcrypt-pbkdf/**/*",
-      "node_modules/tweetnacl/**/*",
-      "node_modules/safer-buffer/**/*",
-      "node_modules/basic-ftp/**/*",
-      "node_modules/adm-zip/**/*"
-    ],
+      "node_modules/**/*"
+   ],
     "directories": {
       "output": "dist"
     },
@@ -58,11 +53,18 @@
     }
   },
   "dependencies": {
+    "@elastic/elasticsearch": "^9.5.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "ace-builds": "^1.45.2",
     "adm-zip": "^0.6.1",
     "basic-ftp": "^6.2.5",
+    "mongodb": "^7.8.0",
+    "mssql": "^12.7.13",
+    "mysql2": "^3.24.6",
+    "pg": "^8.23.1",
+    "redis": "^6.3.1",
+    "sql.js": "^1.15.2",
     "ssh2": "^1.17.0"
   }
 }
