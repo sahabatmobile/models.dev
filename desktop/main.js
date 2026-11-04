@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, safeStorage, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, shell, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -127,6 +127,17 @@ ipcMain.handle('settings:get', () => ({
   hasKey: Boolean(storedKey),
   keyHint: maskKey(storedKey)
 }));
+
+ipcMain.handle('settings:copyKey', () => {
+  if (!storedKey) return { ok: false };
+  clipboard.writeText(storedKey);
+  return { ok: true };
+});
+
+ipcMain.handle('clipboard:write', (event, text) => {
+  clipboard.writeText(String(text || ''));
+  return { ok: true };
+});
 
 ipcMain.handle('settings:set', (event, payload) => {
   const data = readSettings();
