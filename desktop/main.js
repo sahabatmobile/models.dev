@@ -910,12 +910,35 @@ function findRclone() {
   ]);
 }
 
+function readRegistryValue(key, valueName) {
+  try {
+    const out = execFileSync('reg.exe', ['query', key, '/v', valueName], {
+      windowsHide: true,
+      encoding: 'utf8'
+    });
+    const match = out.match(new RegExp(valueName + '\\s+\\S+\\s+(.+)'));
+    return match ? match[1].trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 function findWinFsp() {
-  return findCommand('mount.exe', [
-    'C:\\Program Files (x86)\\WinFSP\\bin\\mount.exe',
-    'C:\\Program Files\\WinFSP\\bin\\mount.exe',
-    'C:\\Program Files\\WinFsp\\bin\\mount.exe'
-  ]);
+  const registryDirs = [
+    readRegistryValue('HKLM\\SOFTWARE\\WOW6432Node\\WinFsp', 'InstallDir'),
+    readRegistryValue('HKLM\\SOFTWARE\\WinFsp', 'InstallDir')
+  ].filter(Boolean);
+  const candidates = [
+    ...registryDirs.map((dir) => path.join(dir, 'bin', 'launcher-x64.exe')),
+    'C:\\Program Files\\WinFsp\\bin\\launcher-x64.exe',
+    'C:\\Program Files (x86)\\WinFsp\\bin\\launcher-x64.exe',
+    'C:\\Program Files\\WinFsp\\bin\\winfsp-x64.dll',
+    'C:\\Program Files (x86)\\WinFsp\\bin\\winfsp-x64.dll'
+  ];
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 function iniEscape(value) {
