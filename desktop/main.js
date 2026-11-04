@@ -2,7 +2,8 @@ const { app, BrowserWindow, ipcMain, safeStorage, shell, clipboard, dialog } = r
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { spawn } = require('child_process');
+const crypto = require('crypto');
+const { spawn, execFileSync, spawnSync } = require('child_process');
 const { Client: SshClient } = require('ssh2');
 const { Client: FtpClient } = require('basic-ftp');
 const AdmZip = require('adm-zip');
@@ -104,7 +105,263 @@ function errorMessage(status, text) {
   return { status, message: detail || fallback[status] || 'Terjadi kesalahan.', type, code };
 }
 
-// ---------- extensions ----------
+// ---------- Open VSX registry ----------
+
+const OPEN_VSX_BASE = 'https://open-vsx.org';
+const MAX_VSIX_SIZE = 150 * 1024 * 1024;
+
+function compareVersions(a, b) {
+  const pa = String(a || '0').match(/\d+/g) || ['0'];
+  const pb = String(b || '0').match(/\d+/g) || ['0'];
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i += 1) {
+    const x = Number(pa[i] || 0);
+    const y = Number(pb[i] || 0);
+    if (x > y) return 1;
+    if (x < y) return -1;
+  }
+  return 0;
+}
+
+async function fetchTextOnce(url, timeoutMs = 15000, binary = false) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'SahabatMobile-Desktop/1.0' },
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error('HTTP ' + res.status + (body ? ': ' + body.slice(0, 200) : ''));
+    }
+    if (binary) return Buffer.from(await res.arrayBuffer());
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchJsonOnce(url, timeoutMs = 15000) {
+  const text = await fetchTextOnce(url, timeoutMs);
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error('Respons Open VSX bukan JSON valid.');
+  }
+}
+
+function zipPath(zip, relativePath) {
+  const entries = zip.getEntries();
+  const clean = normalizePath(relativePath);
+  const candidates = [clean, 'extension/' + clean];
+  for (const entry of entries) {
+    const normalized = entry.entryName.replace(/\\/g, '/').replace(/^\.\//, '');
+    if (candidates.includes(normalized)) return entry;
+  }
+  return null;
+}
+
+function readJsonEntry(zip, relativePath) {
+  const entry = zipPath(zip, relativePath);
+  if (!entry) return null;
+  try {
+    return JSON.parse(entry.getData().toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function readTextEntry(zip, relativePath) {
+  const entry = zipPath(zip, relativePath);
+  return entry ? entry.getData().toString('utf8') : null;
+}
+
+function packageId(pkg) {
+  return safeExtId((pkg.publisher || 'openvsx') + '.' + (pkg.name || 'extension'));
+}
+
+function normalizePath(value) {
+  return String(value || '')
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/^\/+/, '');
+}
+
+function assertSafeRelative(value) {
+  const normalized = normalizePath(value);
+  if (normalized.split('/').includes('..')) throw new Error('Path tidak aman di dalam arsip.');
+  return normalized;
+}
+
+function vsCodeSnippetToAce(snip, fallbackName) {
+  const name = String(snip.prefix || snip.label || fallbackName || 'Snippet').trim();
+  const prefixes = Array.isArray(snip.prefix) ? snip.prefix : [snip.prefix || name];
+  const bodyLines = Array.isArray(snip.body) ? snip.body.slice() : String(snip.body || '').split(/\r?\n/);
+  const description = String(snip.description || name || 'Snippet').replace(/[\r\n]+/g, ' ').trim();
+  const output = [];
+  for (const rawPrefix of prefixes) {
+    if (!rawPrefix) continue;
+    const prefix = String(rawPrefix).trim().split(/\s+/).join('-');
+    if (!prefix) continue;
+    output.push('snippet ' + prefix + ' ' + description);
+    for (const line of bodyLines) {
+      output.push('\t' + String(line).replace(/\t/g, '    '));
+    }
+  }
+  return output.join('\n');
+}
+
+function vsCodeSnippetsToAce(jsonText, sourceName) {
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    throw new Error('File snippet tidak valid: ' + sourceName);
+  }
+  const blocks = [];
+  for (const [name, snip] of Object.entries(parsed || {})) {
+    if (!snip || typeof snip !== 'object') continue;
+    const block = vsCodeSnippetToAce(snip, name);
+    if (block) blocks.push(block);
+  }
+  return blocks.join('\n');
+}
+
+function extractVsLanguages(packageJson) {
+  const languages = {};
+  for (const item of (packageJson.contributes && packageJson.contributes.languages) || []) {
+    const langId = String(item.id || '').trim();
+    if (!langId) continue;
+    for (const rawExt of item.extensions || []) {
+      const ext = String(rawExt).replace(/^\./, '').trim().toLowerCase();
+      if (/^[a-z0-9_-]+$/.test(ext)) languages[ext] = langId;
+    }
+  }
+  return languages;
+}
+
+function sanitizeSnippetFileName(value) {
+  return String(value || 'snippet').replace(/[^a-zA-Z0-9._-]+/g, '-').toLowerCase();
+}
+
+function installFromPackagePaths(packageJson, source, resolveText, resolveBinary) {
+  const vsSnippets = (packageJson.contributes && packageJson.contributes.snippets) || [];
+  const vsLanguages = (packageJson.contributes && packageJson.contributes.languages) || [];
+  const languages = extractVsLanguages(packageJson);
+  const id = packageId(packageJson);
+  const dest = path.join(extensionsDir(), id);
+  const staging = path.join(os.tmpdir(), 'sahabat-ext-install-' + process.pid + '-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+  fs.mkdirSync(path.join(staging, 'snippets'), { recursive: true });
+
+  let snippetCount = 0;
+  const snippetFiles = new Map();
+  try {
+    for (const contribution of vsSnippets) {
+      const language = String(contribution.language || '').trim();
+      const rel = assertSafeRelative(contribution.path || '');
+      if (!language || !rel) continue;
+      const text = resolveText(rel);
+      if (text == null) continue;
+      const converted = vsCodeSnippetsToAce(text, rel);
+      if (!converted) continue;
+      const key = sanitizeSnippetFileName(language);
+      snippetFiles.set(key, (snippetFiles.get(key) || '') + '\n' + converted);
+      snippetCount += (converted.match(/^snippet /mg) || []).length;
+    }
+
+    if (snippetCount === 0 && Object.keys(languages).length === 0) {
+      throw new Error('Ekstensi ini tidak berisi snippet atau mapping bahasa; belum didukung.');
+    }
+
+    for (const [name, content] of snippetFiles.entries()) {
+      fs.writeFileSync(path.join(staging, 'snippets', name + '.snippets'), content.trim() + '\n', 'utf8');
+    }
+
+    const contributes = {};
+    if (snippetFiles.size) {
+      contributes.snippets = {};
+      for (const name of snippetFiles.keys()) contributes.snippets[name] = 'snippets/' + name + '.snippets';
+    }
+    if (Object.keys(languages).length) contributes.languages = languages;
+
+    const manifest = {
+      id,
+      name: packageJson.displayName || packageJson.name || id,
+      version: packageJson.version || '0.0.0',
+      publisher: packageJson.publisher || 'openvsx',
+      description: packageJson.description || '',
+      source: source || { registry: 'openvsx' },
+      contributes
+    };
+
+    if (resolveBinary) {
+      const iconRef = packageJson.icon || packageJson.userIcon;
+      if (iconRef) {
+        try {
+          const rel = assertSafeRelative(iconRef);
+          const iconData = resolveBinary(rel);
+          if (iconData && iconData.length < 2 * 1024 * 1024) {
+            const ext = path.extname(rel).toLowerCase() || '.png';
+            const safeExt = /^\.[a-z0-9]{2,5}$/.test(ext) ? ext : '.png';
+            const destIcon = 'icon' + safeExt;
+            fs.writeFileSync(path.join(staging, destIcon), iconData);
+            manifest.icon = destIcon;
+          }
+        } catch {}
+      }
+    }
+    fs.writeFileSync(path.join(staging, 'extension.json'), JSON.stringify(manifest, null, 2), 'utf8');
+    fs.writeFileSync(path.join(staging, 'package.json'), JSON.stringify(packageJson, null, 2), 'utf8');
+
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.cpSync(staging, dest, { recursive: true });
+    return { id, name: manifest.name, version: manifest.version };
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
+  }
+}
+
+function installFromVsixBuffer(buffer, source) {
+  if (buffer.length > MAX_VSIX_SIZE) throw new Error('Ukuran ekstensi terlalu besar (maks 150 MB).');
+  const zip = new AdmZip(buffer);
+  const packageJson = readJsonEntry(zip, 'extension/package.json') || readJsonEntry(zip, 'package.json');
+  if (!packageJson) throw new Error('Arsip VSIX tidak berisi extension/package.json.');
+  return installFromPackagePaths(packageJson, source, (rel) => readTextEntry(zip, rel), (rel) => {
+    const entry = zipPath(zip, rel);
+    return entry ? entry.getData() : null;
+  });
+}
+
+function installFromDir(dir) {
+  const packageJson = readExtPackageJson(dir);
+  if (packageJson) {
+    return installFromPackagePaths(packageJson, { registry: 'folder', path: dir }, (rel) => {
+      try {
+        return fs.readFileSync(path.join(dir, assertSafeRelative(rel)), 'utf8');
+      } catch {
+        return null;
+      }
+    }, (rel) => {
+      try {
+        return fs.readFileSync(path.join(dir, assertSafeRelative(rel)));
+      } catch {
+        return null;
+      }
+    });
+  }
+  return installExtensionFromDir(dir);
+}
+
+function readExtPackageJson(dir) {
+  try {
+    const raw = fs.readFileSync(path.join(dir, 'package.json'), 'utf8');
+    const pkg = JSON.parse(raw);
+    if (pkg && typeof pkg === 'object' && pkg.name) return pkg;
+  } catch {}
+  return null;
+}
 
 function extensionsDir() {
   return path.join(app.getPath('userData'), 'extensions');
@@ -165,6 +422,22 @@ function readExtSnippets(manifest, dir) {
   return snippets;
 }
 
+function readExtIcon(manifest, dir) {
+  const ref = manifest.icon || (manifest.userIcon && manifest.userIcon);
+  if (!ref) return null;
+  try {
+    const rel = assertSafeRelative(ref);
+    const file = path.join(dir, rel);
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || stat.size > 2 * 1024 * 1024) return null;
+    const ext = path.extname(file).slice(1).toLowerCase();
+    const mime = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', svg: 'image/svg+xml', webp: 'image/webp' }[ext] || 'application/octet-stream';
+    return 'data:' + mime + ';base64,' + fs.readFileSync(file).toString('base64');
+  } catch {
+    return null;
+  }
+}
+
 function listSubdirs(base) {
   try {
     return fs
@@ -188,17 +461,24 @@ function installExtensionFromDir(srcDir) {
 }
 
 async function installExtensionFromZip(zipPath) {
+  const zip = new AdmZip(zipPath);
+  if (readJsonEntry(zip, 'extension/package.json') || readJsonEntry(zip, 'package.json')) {
+    return installFromVsixBuffer(fs.readFileSync(zipPath), {
+      registry: 'vsix',
+      path: zipPath
+    });
+  }
   const tmp = path.join(os.tmpdir(), 'sahabat-ext-' + Date.now());
   fs.mkdirSync(tmp, { recursive: true });
   try {
-    new AdmZip(zipPath).extractAllTo(tmp, true);
+    zip.extractAllTo(tmp, true);
     let root = tmp;
     if (!fs.existsSync(path.join(root, 'extension.json'))) {
       const found = listSubdirs(root).find((dir) => fs.existsSync(path.join(dir, 'extension.json')));
       if (found) root = found;
     }
     if (!fs.existsSync(path.join(root, 'extension.json'))) {
-      throw new Error('extension.json tidak ada di dalam arsip.');
+      throw new Error('Arsip tidak berisi ekstensi yang didukung (package.json atau extension.json).');
     }
     return installExtensionFromDir(root);
   } finally {
@@ -206,7 +486,7 @@ async function installExtensionFromZip(zipPath) {
   }
 }
 
-ipcMain.handle('ext:list', () => {
+function getInstalledExtensions() {
   const state = readExtState();
   const installed = [];
   const installedIds = new Set();
@@ -219,9 +499,15 @@ ipcMain.handle('ext:list', () => {
       ...manifest,
       id,
       enabled: !state.disabled.includes(id),
-      snippets: readExtSnippets(manifest, dir)
+      snippets: readExtSnippets(manifest, dir),
+      iconDataUrl: readExtIcon(manifest, dir)
     });
   }
+  return { installed, installedIds };
+}
+
+ipcMain.handle('ext:list', () => {
+  const { installed, installedIds } = getInstalledExtensions();
   const catalog = [];
   for (const dir of listSubdirs(builtinExtensionsDir())) {
     const manifest = readExtManifest(dir);
@@ -251,7 +537,7 @@ ipcMain.handle('ext:installFolder', async () => {
   });
   if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
   try {
-    return { ok: true, ...installExtensionFromDir(result.filePaths[0]) };
+    return { ok: true, ...installFromDir(result.filePaths[0]) };
   } catch (err) {
     return { ok: false, error: err.message };
   }
@@ -303,6 +589,389 @@ ipcMain.handle('ext:openDir', async () => {
   return err ? { ok: false, error: err } : { ok: true };
 });
 
+async function downloadAndInstallOpenVsx(namespace, name, version) {
+  const base = OPEN_VSX_BASE + '/api/' + encodeURIComponent(namespace) + '/' + encodeURIComponent(name);
+  const latest = await fetchJsonOnce(base);
+  const selectedVersion = version || latest.version;
+  if (!selectedVersion) throw new Error('Versi ekstensi tidak ditemukan.');
+  const meta = version ? await fetchJsonOnce(base + '/' + encodeURIComponent(selectedVersion)) : latest;
+  const downloadUrl = (meta.files && meta.files.download) ||
+    base + '/' + encodeURIComponent(selectedVersion) + '/file/' +
+    encodeURIComponent(namespace + '.' + name + '-' + selectedVersion + '.vsix');
+  const buf = await fetchTextOnce(downloadUrl, 60000, true);
+  if (buf.length > MAX_VSIX_SIZE) throw new Error('Ukuran ekstensi terlalu besar (maks 150 MB).');
+  if (meta.files && meta.files.sha256) {
+    const expected = (await fetchTextOnce(meta.files.sha256, 15000)).trim().toLowerCase();
+    const actual = crypto.createHash('sha256').update(buf).digest('hex');
+    if (expected && actual !== expected) throw new Error('Checksum VSIX tidak cocok.');
+  }
+  const installed = installFromVsixBuffer(buf, {
+    registry: 'openvsx',
+    namespace,
+    name,
+    version: selectedVersion
+  });
+  return installed;
+}
+
+ipcMain.handle('ext:searchOpenVsx', async (event, query) => {
+  const q = String(query || '').trim();
+  if (!q) return { ok: true, extensions: [] };
+  try {
+    const url = OPEN_VSX_BASE + '/api/-/search?query=' + encodeURIComponent(q) + '&size=15';
+    const data = await fetchJsonOnce(url);
+    const extensions = (data.extensions || []).map((item) => ({
+      id: safeExtId(String(item.namespace || '') + '.' + String(item.name || '')),
+      namespace: item.namespace || '',
+      name: item.name || '',
+      displayName: item.displayName || item.name || '',
+      description: item.description || '',
+      version: item.version || '',
+      publisher: item.namespaceDisplayName || item.namespace || '',
+      downloadCount: Number(item.downloadCount || 0),
+      rating: Number(item.averageRating || item.rating || 0),
+      reviewCount: Number(item.reviewCount || 0),
+      verified: Boolean(item.verified),
+      targetPlatform: item.targetPlatform || 'universal',
+      repository: item.repository || item.homepage || '',
+      registry: 'openvsx',
+      icon: item.files && typeof item.files.icon === 'string' && item.files.icon.startsWith('https://open-vsx.org/')
+        ? item.files.icon
+        : ''
+    }));
+    return { ok: true, extensions };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ext:installOpenVsx', async (event, payload) => {
+  const namespace = String(payload?.namespace || '').trim();
+  const name = String(payload?.name || '').trim();
+  const version = String(payload?.version || '').trim();
+  if (!namespace || !name) return { ok: false, error: 'Namespace dan nama ekstensi wajib diisi.' };
+
+  try {
+    const installed = await downloadAndInstallOpenVsx(namespace, name, version || undefined);
+    return { ok: true, ...installed };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ext:checkUpdates', async () => {
+  try {
+    const { installed } = getInstalledExtensions();
+    const candidates = installed.filter((ext) => ext.source && ext.source.registry === 'openvsx');
+    const checks = candidates.map(async (ext) => {
+      try {
+        const meta = await fetchJsonOnce(
+          OPEN_VSX_BASE + '/api/' + encodeURIComponent(ext.source.namespace) + '/' + encodeURIComponent(ext.source.name)
+        );
+        const latest = meta.version || '';
+        if (latest && compareVersions(latest, ext.version) > 0) {
+          return {
+            id: ext.id,
+            name: ext.name,
+            current: ext.version,
+            latest,
+            downloadCount: Number(meta.downloadCount || 0)
+          };
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    });
+    const updates = (await Promise.all(checks)).filter(Boolean);
+    return { ok: true, updates, checked: candidates.length };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ext:updateAll', async () => {
+  try {
+    const { installed } = getInstalledExtensions();
+    const candidates = installed.filter((ext) => ext.source && ext.source.registry === 'openvsx');
+    const checks = await Promise.all(candidates.map(async (ext) => {
+      try {
+        const meta = await fetchJsonOnce(
+          OPEN_VSX_BASE + '/api/' + encodeURIComponent(ext.source.namespace) + '/' + encodeURIComponent(ext.source.name)
+        );
+        return { ext, latest: meta.version || '' };
+      } catch {
+        return { ext, latest: '' };
+      }
+    }));
+
+    const results = [];
+    for (const { ext, latest } of checks) {
+      if (!latest || compareVersions(latest, ext.version) <= 0) continue;
+      try {
+        await downloadAndInstallOpenVsx(ext.source.namespace, ext.source.name, latest);
+        results.push({ id: ext.id, ok: true, name: ext.name, from: ext.version, to: latest });
+      } catch (err) {
+        results.push({ id: ext.id, ok: false, name: ext.name, error: err.message });
+      }
+    }
+    return { ok: true, results };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('ext:openExternal', async (event, url) => {
+  const value = String(url || '');
+  if (!/^https:\/\/(open-vsx\.org|github\.com|gitlab\.com|bitbucket\.org|www\.[a-z0-9.-]+)\//i.test(value) &&
+      !/^https:\/\/[a-z0-9.-]+\.[a-z]{2,}\//i.test(value) &&
+      !/^https:\/\/open-vsx\.org/i.test(value)) {
+    return { ok: false, error: 'URL tidak didukung' };
+  }
+  await shell.openExternal(value);
+  return { ok: true };
+});
+
+// ---------- drive mapping (rclone + WinFsp / SMB) ----------
+
+function driveMappingDir() {
+  return path.join(app.getPath('userData'), 'drive-mounts');
+}
+
+function driveMappingFile() {
+  return path.join(driveMappingDir(), 'mappings.json');
+}
+
+function readDriveMappings() {
+  try {
+    const data = JSON.parse(fs.readFileSync(driveMappingFile(), 'utf8'));
+    return Array.isArray(data.mappings) ? data.mappings : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeDriveMappings(mappings) {
+  fs.mkdirSync(driveMappingDir(), { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(driveMappingDir(), 0o700); } catch {}
+  fs.writeFileSync(driveMappingFile(), JSON.stringify({ mappings }, null, 2), { mode: 0o600 });
+  try { fs.chmodSync(driveMappingFile(), 0o600); } catch {}
+}
+
+function isDriveInUse(drive) {
+  try {
+    return fs.existsSync(drive + ':\\') || String(spawnSync('net.exe', ['use'], { windowsHide: true, encoding: 'utf8' }).stdout || '').includes(drive + ':');
+  } catch {
+    return fs.existsSync(drive + ':\\');
+  }
+}
+
+function findCommand(name, fallbacks) {
+  const fromEnv = process.env[name.toUpperCase().replace(/[^A-Z0-9]/g, '_') + '_EXE'];
+  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
+  for (const candidate of fallbacks || []) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+  try {
+    const out = execFileSync('where.exe', [name], { windowsHide: true, encoding: 'utf8' });
+    const match = out.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+    return match || null;
+  } catch {
+    return null;
+  }
+}
+
+function findRclone() {
+  return findCommand('rclone.exe', [
+    'C:\\Program Files\\rclone\\rclone.exe',
+    'C:\\Program Files (x86)\\rclone\\rclone.exe',
+    path.join(os.homedir(), 'scoop', 'shims', 'rclone.exe'),
+    path.join(os.homedir(), 'AppData', 'Local', 'Microsoft', 'WinGet', 'Packages', 'Rclone.Rclone', 'rclone.exe')
+  ]);
+}
+
+function findWinFsp() {
+  return findCommand('mount.exe', [
+    'C:\\Program Files (x86)\\WinFSP\\bin\\mount.exe',
+    'C:\\Program Files\\WinFSP\\bin\\mount.exe',
+    'C:\\Program Files\\WinFsp\\bin\\mount.exe'
+  ]);
+}
+
+function iniEscape(value) {
+  return String(value || '').replace(/[\"\\]/g, '\\$&').replace(/[\r\n]+/g, ' ');
+}
+
+function buildRcloneConfig(remoteName, payload, obscuredPass, obscuredKeyPass) {
+  const lines = [
+    '[' + remoteName + ']',
+    'type = sftp',
+    'host = ' + iniEscape(payload.host),
+    'user = ' + iniEscape(payload.username),
+    'port = ' + (Number(payload.port) || 22),
+    'known_hosts_file = none'
+  ];
+  if (obscuredPass) lines.push('pass = ' + obscuredPass);
+  if (payload.privateKey) lines.push('key_file = ' + iniEscape(payload.privateKey));
+  if (obscuredKeyPass) lines.push('key_file_pass = ' + obscuredKeyPass);
+  return lines.join('\n') + '\n';
+}
+
+ipcMain.handle('drive:map', async (event, payload) => {
+  try {
+    if (process.platform !== 'win32') return { ok: false, error: 'Map drive hanya tersedia di Windows.' };
+    const drive = String(payload.drive || '').trim().toUpperCase().replace(/:$/, '');
+    if (!/^[A-Z]$/.test(drive)) return { ok: false, error: 'Pilih drive valid, mis. G:.' };
+    if (isDriveInUse(drive)) return { ok: false, error: 'Drive ' + drive + ': sudah dipakai.' };
+    const remotePath = String(payload.remotePath || '').trim();
+    if (!remotePath) return { ok: false, error: 'Path VPS tidak valid.' };
+    if (payload.method === 'smb') {
+      const unc = String(payload.unc || '').trim();
+      const user = String(payload.username || '').trim();
+      const password = String(payload.password || '');
+      if (!/^\\\\[^\\]+\\[^\\]+/.test(unc)) return { ok: false, error: 'UNC share tidak valid. Contoh: \\\\10.10.10.2\\data\\project' };
+      if (!user) return { ok: false, error: 'Username SMB wajib diisi.' };
+      const args = ['use', drive + ':', unc];
+      if (password) args.push(password);
+      args.push('/USER:' + user);
+      args.push('/PERSISTENT:' + (payload.persistent ? 'YES' : 'NO'));
+      const result = spawnSync('net.exe', args, { windowsHide: true, encoding: 'utf8' });
+      const out = ((result.stdout || '') + '\n' + (result.stderr || '')).trim();
+      if (result.status !== 0) return { ok: false, error: out || 'Gagal memakai net use.' };
+      const mappings = readDriveMappings().filter((item) => item.drive !== drive);
+      mappings.push({ drive, method: 'smb', unc, username: user, created: new Date().toISOString() });
+      writeDriveMappings(mappings);
+      return { ok: true, drive, message: out || ('Drive ' + drive + ': berhasil dipasang.') };
+    }
+
+    if (payload.method !== 'rclone') return { ok: false, error: 'Metode tidak dikenal.' };
+    const host = String(payload.host || '').trim();
+    const user = String(payload.username || '').trim();
+    if (!host || !user) return { ok: false, error: 'Host dan username wajib diisi.' };
+    const password = String(payload.password || '');
+    const privateKey = String(payload.privateKey || '').trim();
+    if (privateKey && !fs.existsSync(privateKey)) return { ok: false, error: 'File private key tidak ditemukan: ' + privateKey };
+
+    const rclone = findRclone();
+    if (!rclone) {
+      return { ok: false, error: 'rclone tidak ditemukan. Install dari https://rclone.org/downloads/ lalu coba lagi.' };
+    }
+    const winfsp = findWinFsp();
+    if (!winfsp) {
+      return { ok: false, error: 'WinFsp tidak ditemukan. Install dari https://github.com/winfsp/winfsp/releases lalu coba lagi.' };
+    }
+
+    const obscurePtr = (value) => execFileSync(rclone, ['obscure', value], {
+      windowsHide: true,
+      encoding: 'utf8',
+      timeout: 15000,
+      maxBuffer: 64 * 1024
+    }).trim();
+
+    let obscuredPass = '';
+    let obscuredKeyPass = '';
+    try {
+      if (password) obscuredPass = obscurePtr(password);
+      if (privateKey && password) obscuredKeyPass = obscurePtr(password);
+    } catch (err) {
+      return { ok: false, error: 'Gagal mengencode password untuk rclone: ' + err.message };
+    }
+
+    const remoteName = 'sahabat-' + drive.toLowerCase();
+    const configDir = path.join(driveMappingDir(), drive);
+    fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(configDir, 0o700); } catch {}
+    const configPath = path.join(configDir, 'rclone.conf');
+    const logPath = path.join(configDir, 'mount.log');
+    fs.writeFileSync(configPath, buildRcloneConfig(remoteName, {
+      host,
+      username: user,
+      port: Number(payload.port) || 22,
+      privateKey
+    }, obscuredPass, obscuredKeyPass), { mode: 0o600 });
+    try { fs.chmodSync(configPath, 0o600); } catch {}
+
+    const args = [
+      'mount',
+      remoteName + ':' + remotePath,
+      drive + ':',
+      '--network-mode',
+      '--volname', 'Sahabat VPS',
+      '--vfs-cache-mode', String(payload.cacheMode || 'full'),
+      '--config', configPath,
+      '--log-level', 'INFO'
+    ];
+    const logFd = fs.openSync(logPath, 'a');
+    const child = spawn(rclone, args, {
+      detached: true,
+      windowsHide: true,
+      stdio: ['ignore', logFd, logFd]
+    });
+    fs.closeSync(logFd);
+    child.unref();
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    if (child.exitCode !== null) {
+      let detail = '';
+      try { detail = fs.readFileSync(logPath, 'utf8').slice(-2000); } catch {}
+      return { ok: false, error: 'rclone keluar dengan error. ' + (detail || 'Cek koneksi dan kredensial Anda.') };
+    }
+    const mappings = readDriveMappings().filter((item) => item.drive !== drive);
+    mappings.push({
+      drive,
+      method: 'rclone',
+      pid: child.pid,
+      host,
+      port: Number(payload.port) || 22,
+      username: user,
+      remotePath,
+      config: configPath,
+      created: new Date().toISOString()
+    });
+    writeDriveMappings(mappings);
+    return { ok: true, drive, message: 'Drive ' + drive + ': akan segera tampil. Jika belum muncul, cek log di ' + logPath };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('drive:unmap', async (event, driveInput) => {
+  try {
+    if (process.platform !== 'win32') return { ok: false, error: 'Hanya tersedia di Windows.' };
+    const drive = String(driveInput || '').trim().toUpperCase().replace(/:$/, '');
+    if (!/^[A-Z]$/.test(drive)) return { ok: false, error: 'Drive tidak valid.' };
+    const mappings = readDriveMappings();
+    const mapping = mappings.find((item) => item.drive === drive);
+    let ok = false;
+    let output = '';
+
+    if (mapping && mapping.method === 'rclone') {
+      const rclone = findRclone();
+      if (rclone && mapping.config && fs.existsSync(mapping.config)) {
+        const result = spawnSync(rclone, ['unmount', drive + ':', '--config', mapping.config], { windowsHide: true, encoding: 'utf8' });
+        ok = result.status === 0;
+        output = ((result.stdout || '') + '\n' + (result.stderr || '')).trim();
+      }
+      if (mapping.pid) {
+        try { process.kill(mapping.pid); ok = true; } catch {}
+      }
+      const fallback = spawnSync('net.exe', ['use', drive + ':', '/delete', '/Y'], { windowsHide: true, encoding: 'utf8' });
+      output = output || ((fallback.stdout || '') + '\n' + (fallback.stderr || '')).trim();
+      ok = ok || fallback.status === 0;
+      if (mapping.config) { try { fs.unlinkSync(mapping.config); } catch {} }
+    } else {
+      const result = spawnSync('net.exe', ['use', drive + ':', '/delete', '/Y'], { windowsHide: true, encoding: 'utf8' });
+      ok = result.status === 0;
+      output = ((result.stdout || '') + '\n' + (result.stderr || '')).trim();
+    }
+
+    if (!ok) return { ok: false, error: output || 'Gagal unmount drive ' + drive + ':' };
+    writeDriveMappings(mappings.filter((item) => item.drive !== drive));
+    return { ok: true, message: 'Drive ' + drive + ': dilepas.' };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1380,
@@ -348,11 +1017,36 @@ function createWindow() {
             out.sideWidth = document.querySelector('#sidepanel').style.width;
             out.agentWidth = getComputedStyle(document.documentElement).getPropertyValue('--agent-width').trim();
             document.querySelector('[data-view="extensions"]').click();
-            await new Promise(r => setTimeout(r, 250));
+            await new Promise(r => setTimeout(r, 3500));
             out.extView = !document.querySelector('#view-extensions').classList.contains('hidden');
-            out.catalogCards = document.querySelectorAll('#extList .ext-card').length;
+            out.extensionRows = document.querySelectorAll('#extList .ext-side-item').length;
+            out.extensionDetail = !!document.querySelector('#extDetail h1') || !!document.querySelector('#extDetail .ext-detail-header');
+            out.extFilter = !!document.querySelector('#extFilter');
+            document.getElementById('extSearch').value = 'python snippets';
+            document.getElementById('extSearch').dispatchEvent(new Event('input', { bubbles: true }));
+            await new Promise(r => setTimeout(r, 3500));
+            out.marketRows = document.querySelectorAll('#extList .ext-side-item').length;
+            const openVsxSearch = await window.sahabat.extSearchOpenVsx('python snippets');
+            out.openVsxResults = openVsxSearch.ok ? openVsxSearch.extensions.length : -1;
             const beforeExtensions = await window.sahabat.extList();
             out.catalog = beforeExtensions.catalog.length;
+            const testId = 'ericsia.pythonsnippets3';
+            const hadOpenVsxTest = beforeExtensions.extensions.some(e => e.id.toLowerCase() === testId);
+            if (!hadOpenVsxTest) {
+              const installed = await window.sahabat.extInstallOpenVsx({ namespace: 'EricSia', name: 'pythonsnippets3', version: '3.3.18' });
+              const afterInstall = await window.sahabat.extList();
+              const updates = await window.sahabat.extCheckUpdates();
+              const removed = await window.sahabat.extRemove('ericsia.pythonsnippets3');
+              out.openVsxTest = {
+                ok: installed.ok,
+                error: installed.error || '',
+                listed: afterInstall.extensions.some(e => e.id.toLowerCase() === testId),
+                updateCheck: updates.ok ? updates.checked : -1,
+                removed: removed.ok
+              };
+            } else {
+              out.openVsxTest = 'already-installed';
+            }
             const hadPythonPack = beforeExtensions.extensions.some(e => e.id === 'python-pack');
             if (!hadPythonPack) {
               const installed = await window.sahabat.extInstallBuiltin('python-pack');
@@ -384,6 +1078,11 @@ function createWindow() {
             await new Promise(r => setTimeout(r, 60));
             out.treeMenu = Array.from(document.querySelectorAll('#contextMenu .context-item')).map(b => b.textContent);
             document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            out.mapModal = !!document.querySelector('#mapModal');
+            out.uploadApi = typeof window.sahabat.uploadEntry;
+            out.downloadApi = typeof window.sahabat.downloadEntry;
+            out.mapApi = typeof window.sahabat.mapDrive;
+            out.unmapApi = typeof window.sahabat.unmapDrive;
             out.clipboardApi = typeof window.sahabat.readClipboard;
             out.entryApi = typeof window.sahabat.entryCopy + '/' + typeof window.sahabat.entryMove;
             out.searchbox = typeof ace.require('ace/ext/searchbox');
@@ -1152,6 +1851,113 @@ ipcMain.handle('entry:move', async (event, payload) => {
   }
 });
 
+ipcMain.handle('entry:upload', async (event, payload) => {
+  try {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const mode = payload.mode === 'folder' ? 'folder' : 'file';
+    const dialogOptions = mode === 'folder'
+      ? { title: 'Pilih folder untuk diunggah ke target', properties: ['openDirectory'] }
+      : { title: 'Pilih file untuk diunggah ke target', properties: ['openFile', 'multiSelections'] };
+    const result = await dialog.showOpenDialog(win, dialogOptions);
+    if (result.canceled || !result.filePaths.length) return { ok: true, canceled: true, uploaded: [] };
+
+    const dstTarget = payload.dstTarget || { type: 'local', id: null };
+    const dstSession = targetSession(dstTarget);
+    const dstDir = payload.dstDir;
+    if (!dstDir) throw new Error('Folder tujuan tidak valid.');
+    try {
+      const entries = await listRaw(dstSession, dstDir);
+      void entries;
+    } catch {
+      throw new Error('Folder tujuan tidak bisa diakses.');
+    }
+
+    const itemIsDir = (source) => fs.statSync(source).isDirectory();
+    if (mode === 'folder' && !itemIsDir(result.filePaths[0])) {
+      throw new Error('Folder yang dipilih tidak valid.');
+    }
+
+    const names = result.filePaths.map((source) => basenameForRemote(false, source));
+    const existing = new Set((await listRaw(dstSession, dstDir)).map((entry) => entry.name));
+    const overlaps = names.filter((name) => existing.has(name));
+    if (overlaps.length) {
+      const answer = await dialog.showMessageBox(win, {
+        type: 'question',
+        title: 'Timpa file?',
+        message: `Ada ${overlaps.length} file/folder dengan nama yang sama di tujuan.`,
+        detail: overlaps.slice(0, 20).join(', ') + (overlaps.length > 20 ? '\n...' : ''),
+        buttons: ['Timpa', 'Batal'],
+        defaultId: 0,
+        cancelId: 1
+      });
+      if (answer.response !== 0) return { ok: true, canceled: true, uploaded: [] };
+    }
+
+    const uploaded = [];
+    const failed = [];
+    for (const source of result.filePaths) {
+      try {
+        if (mode === 'file' && itemIsDir(source)) continue;
+        const name = basenameForRemote(false, source);
+        const destPath = dstSession ? posix.join(dstDir, name) : path.join(dstDir, name);
+        await copyEntry(null, source, dstSession, destPath, itemIsDir(source));
+        uploaded.push({ source, dest: destPath });
+      } catch (err) {
+        failed.push({ source, error: err.message });
+      }
+    }
+    return { ok: failed.length === 0, uploaded, failed, dstDir };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('entry:download', async (event, payload) => {
+  try {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const srcTarget = payload.srcTarget || { type: 'local', id: null };
+    const srcSession = targetSession(srcTarget);
+    const name = payload.name || basenameForRemote(Boolean(srcSession), payload.srcPath);
+    const downloadDir = app.getPath('downloads');
+    let destPath;
+
+    if (!payload.isDir) {
+      const result = await dialog.showSaveDialog(win, {
+        title: 'Simpan file dari target',
+        defaultPath: path.join(downloadDir, name)
+      });
+      if (result.canceled || !result.filePath) return { ok: true, canceled: true };
+      destPath = result.filePath;
+    } else {
+      const result = await dialog.showOpenDialog(win, {
+        title: 'Pilih folder tujuan',
+        properties: ['openDirectory', 'createDirectory']
+      });
+      if (result.canceled || !result.filePaths[0]) return { ok: true, canceled: true };
+      destPath = path.join(result.filePaths[0], name);
+    }
+
+    if (fs.existsSync(destPath)) {
+      const answer = await dialog.showMessageBox(win, {
+        type: 'question',
+        title: payload.isDir ? 'Tambahkan ke folder?' : 'Timpa file?',
+        message: payload.isDir
+          ? `Folder "${name}" sudah ada. Isi akan ditambahkan/ditimpa.`
+          : `File "${basenameForRemote(false, destPath)}" akan ditimpa.`,
+        buttons: ['Lanjutkan', 'Batal'],
+        defaultId: 0,
+        cancelId: 1
+      });
+      if (answer.response !== 0) return { ok: true, canceled: true };
+    }
+
+    await copyEntry(srcSession, payload.srcPath, null, destPath, Boolean(payload.isDir));
+    return { ok: true, path: destPath };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 ipcMain.handle('term:start', async (event, payload) => {
   const id = 't' + (++termSeq);
   const sh = localShell();
@@ -1207,7 +2013,7 @@ ipcMain.handle('remote:connect', async (event, cfg) => {
       });
       const home = await client.pwd();
       remotes.set(id, { type: 'ftp', client, home, shell: null });
-      return { ok: true, id, home, type: 'ftp', label: 'FTP ' + username + '@' + host };
+      return { ok: true, id, home, type: 'ftp', label: 'FTP ' + username + '@' + host, host, port: Number(cfg.port) || 21, username };
     } catch (err) {
       try { client.close(); } catch {}
       return { ok: false, error: err.message };
@@ -1245,7 +2051,8 @@ ipcMain.handle('remote:connect', async (event, cfg) => {
       remotes.delete(id);
       send('remote:closed', { id });
     });
-    return { ok: true, id, home, type: 'ssh', label: 'SSH ' + username + '@' + host };
+    const port = Number(cfg.port) || 22;
+    return { ok: true, id, home, type: 'ssh', label: 'SSH ' + username + '@' + host, host, port, username };
   } catch (err) {
     try { client.end(); } catch {}
     return { ok: false, error: err.message };

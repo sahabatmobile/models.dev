@@ -81,10 +81,19 @@
     agent: { messages: [], busy: false },
     snippet: 'curl',
     cloneDir: null,
+    mapTarget: null,
     clipboard: null,
     extensions: [],
     extCatalog: [],
     extApplied: new Set(),
+    extSearchTerm: '',
+    extSearchTimer: null,
+    extMarket: [],
+    extMarketLoading: false,
+    extMarketLoaded: false,
+    extUpdates: {},
+    extSelected: null,
+    extFilter: 'all',
     ui: {
       sideWidth: parseInt(localStorage.getItem('sahabat.sideWidth'), 10) || 252,
       agentWidth: parseInt(localStorage.getItem('sahabat.agentWidth'), 10) || 344
@@ -165,7 +174,24 @@
     const target = $('view-' + view);
     if (target) target.classList.remove('hidden');
     $('viewTitle').textContent = VIEW_TITLES[view] || view;
-    $('app').classList.toggle('no-side', view !== 'workspace');
+    const connectionOpen = !$('connectionPane').classList.contains('hidden');
+    const showExtensionsPane = view === 'extensions';
+    const showWorkspacePane = view === 'workspace';
+    $('app').classList.toggle('no-side', !showExtensionsPane && !showWorkspacePane);
+    if (showWorkspacePane) {
+      $('extensionPane').classList.add('hidden');
+      $('explorerPane').classList.toggle('hidden', connectionOpen);
+      $('connectionPane').classList.toggle('hidden', !connectionOpen);
+    } else if (showExtensionsPane) {
+      $('explorerPane').classList.add('hidden');
+      $('connectionPane').classList.add('hidden');
+      $('extensionPane').classList.remove('hidden');
+      if (!S.extMarketLoaded) loadRecommendedExtensions(true);
+    } else {
+      $('explorerPane').classList.add('hidden');
+      $('connectionPane').classList.add('hidden');
+      $('extensionPane').classList.add('hidden');
+    }
     if (view === 'workspace') {
       ensureWorkspace();
     }
@@ -347,8 +373,16 @@
       { label: 'Paste', disabled: !S.clipboard, action: () => pasteInto(folder) },
       { label: 'Copy path', action: async () => { await api.copyText(node.path); toast('Path disalin'); } },
       { sep: true },
+      { label: 'Upload file...', action: () => uploadInto(folder, 'file') },
+      { label: 'Upload folder...', action: () => uploadInto(folder, 'folder') },
+      { label: 'Download...', action: () => downloadEntryFor(node) },
+      { sep: true },
       { label: 'New file', action: () => createEntry('file', folder) },
       { label: 'New folder', action: () => createEntry('dir', folder) },
+      { sep: true },
+      { label: 'Buka di terminal', disabled: !node.dir, action: () => openInTerminal(node) },
+      { label: 'Map drive...', disabled: !node.dir || S.target.type !== 'ssh', action: () => openMapDrive(node) },
+      { label: 'Refresh', action: () => refreshExplorer() },
       { sep: true },
       { label: 'Delete', action: () => deleteEntry(node) }
     ]);
@@ -362,6 +396,11 @@
       { label: 'New folder', disabled: !dir, action: () => createEntry('dir', dir) },
       { label: 'Paste', disabled: !S.clipboard || !dir, action: () => pasteInto(dir) },
       { sep: true },
+      { label: 'Upload file...', disabled: !dir, action: () => uploadInto(dir, 'file') },
+      { label: 'Upload folder...', disabled: !dir, action: () => uploadInto(dir, 'folder') },
+      { sep: true },
+      { label: 'Buka di terminal', disabled: !dir, action: () => openInTerminal({ path: dir, name: baseName(dir), dir: true }) },
+      { label: 'Map drive...', disabled: !dir || S.target.type !== 'ssh', action: () => openMapDrive({ path: dir, name: baseName(dir), dir: true }) },
       { label: 'Refresh', action: () => refreshExplorer() }
     ]);
   }
@@ -544,7 +583,7 @@
     btn.disabled = false;
     btn.textContent = 'Hubungkan';
     if (!res.ok) { toast('Koneksi gagal: ' + (res.error || 'unknown')); return; }
-    const conn = { id: res.id, type: res.type, label: res.label, home: res.home, dir: res.home };
+    const conn = { id: res.id, type: res.type, label: res.label, home: res.home, dir: res.home, host: res.host, port: res.port, username: res.username };
     S.connections.push(conn);
     S.remotes.set(res.id, conn);
     renderTargetSelect();
@@ -830,90 +869,352 @@
   }
 
   // ---------- Extensions ----------
-  function extCard(ext, kind) {
-    const card = document.createElement('div');
-    card.className = 'ext-card';
-    const langs = (ext.contributes && ext.contributes.languages) || {};
-    const badges = Object.keys(langs).slice(0, 8).map((name) => '<span class="ext-badge">.' + esc(name) + '</span>').join('');
-    const snippetScopes = ext.snippets ? Object.keys(ext.snippets) : Object.keys((ext.contributes && ext.contributes.snippets) || {});
-    const main = document.createElement('div');
-    main.className = 'ext-main';
-    main.innerHTML = '<div class="ext-title">' + esc(ext.name) + ' <span class="ext-id">' + esc(ext.id) + '</span></div>'
-      + '<div class="ext-desc">' + esc(ext.description || '') + '</div>'
-      + '<div class="ext-meta">v' + esc(ext.version || '1.0.0') + (ext.publisher ? ' · ' + esc(ext.publisher) : '')
-      + ' · ' + snippetScopes.length + ' set snippet ' + badges + '</div>';
-    const actions = document.createElement('div');
-    actions.className = 'ext-actions';
-    const button = (label, cls, fn) => {
+  function formatDownloads(value) {
+    const n = Number(value || 0);
+    if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + ' M unduhan';
+    if (n >= 1000) return Math.round(n / 1000).toLocaleString('id-ID') + ' Ribu unduhan';
+    return n.toLocaleString('id-ID') + ' unduhan';
+  }
+
+  function formatRating(value) {
+    const n = Number(value || 0);
+    if (!n) return 'Belum ada rating';
+    return n.toFixed(1) + ' dari 5 (' + Math.round(n * 10) / 10 + '/5)';
+  }
+
+  function extMatches(ext, query) {
+    if (!query) return true;
+    return (ext.id + ' ' + (ext.name || '') + ' ' + (ext.description || '') + ' ' + (ext.publisher || ext.namespace || '')).toLowerCase().includes(query);
+  }
+
+  function openVsxUrl(ext) {
+    if (ext.repository && /^https?:\/\//i.test(ext.repository)) return ext.repository;
+    if (ext.namespace && ext.name) return 'https://open-vsx.org/extension/' + ext.namespace + '/' + ext.name;
+    return 'https://open-vsx.org';
+  }
+
+  function extIconHtml(ext, className) {
+    if (ext.iconDataUrl) return '<img class="' + className + '" src="' + esc(ext.iconDataUrl) + '" alt="" />';
+    if (ext.icon) return '<img class="' + className + '" src="' + esc(ext.icon) + '" alt="" />';
+    let hash = 0;
+    for (const ch of String(ext.id || ext.name || '?')) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+    const hue = hash % 360;
+    const letter = String(ext.name || ext.id || '?').trim().charAt(0).toUpperCase() || '?';
+    return '<div class="' + className + ' ext-avatar" style="background:hsl(' + hue + ' 65% 34%)">' + esc(letter) + '</div>';
+  }
+
+  function findExtension(id) {
+    return S.extensions.find((ext) => ext.id === id)
+      || S.extCatalog.find((ext) => ext.id === id)
+      || S.extMarket.find((ext) => ext.id === id)
+      || null;
+  }
+
+  function extKindOf(ext) {
+    if (S.extensions.includes(ext)) return 'installed';
+    if (S.extCatalog.includes(ext)) return 'catalog';
+    return 'market';
+  }
+
+  function extensionSourceLabel(ext) {
+    if (!ext.source) return 'Lokal';
+    if (ext.source.registry === 'openvsx') return 'Open VSX';
+    if (ext.source.registry === 'folder') return 'Folder';
+    if (ext.source.registry === 'vsix') return 'VSIX';
+    return 'Ekstensi';
+  }
+
+  function addExtAction(container, ext, kind, compact) {
+    const source = ext.source || {};
+    const update = S.extUpdates[ext.id];
+    const makeButton = (label, className, action, title) => {
       const btn = document.createElement('button');
-      btn.className = cls;
+      btn.className = className;
       btn.textContent = label;
-      btn.addEventListener('click', async () => {
+      btn.title = title || label;
+      btn.addEventListener('click', async (event) => {
+        event.stopPropagation();
         btn.disabled = true;
-        try { await fn(); } finally { btn.disabled = false; }
+        try { await action(btn); } finally { btn.disabled = false; }
       });
       return btn;
     };
+
     if (kind === 'installed') {
-      actions.appendChild(button(ext.enabled ? 'Disable' : 'Enable', 'ghost small', async () => {
+      if (source.registry === 'openvsx') {
+        container.appendChild(makeButton(update ? 'Update v' + update.latest : 'Periksa update', update ? 'primary small' : 'ghost small', async () => {
+          await installOpenVsxExtension(source.namespace, source.name, update ? update.latest : undefined);
+        }));
+      } else if (S.extUpdates[ext.id]) {
+        container.appendChild(makeButton('Update v' + S.extUpdates[ext.id].latest, 'primary small', async () => {
+          await installOpenVsxExtension(source.namespace, source.name, S.extUpdates[ext.id].latest);
+        }));
+      }
+      container.appendChild(makeButton(ext.enabled ? 'Disable' : 'Enable', 'ghost small', async () => {
         const res = await api.extSetEnabled(ext.id, !ext.enabled);
-        if (!res.ok) { toast(res.error || 'Gagal'); return; }
+        if (!res.ok) { toast(res.error || 'Gagal mengubah status'); return; }
         await refreshExtensions();
         toast(ext.enabled ? 'Dinonaktifkan: ' + ext.name : 'Diaktifkan: ' + ext.name);
       }));
-      actions.appendChild(button('Hapus', 'ghost small danger', async () => {
+      container.appendChild(makeButton('Hapus', 'ghost small danger', async () => {
         if (!confirm('Hapus ekstensi ' + ext.name + '?')) return;
         const res = await api.extRemove(ext.id);
         if (!res.ok) { toast(res.error || 'Gagal menghapus'); return; }
+        if (S.extSelected === ext.id) S.extSelected = null;
         await refreshExtensions();
         toast('Dihapus: ' + ext.name);
       }));
-      const status = document.createElement('span');
-      status.className = 'ext-status ' + (ext.enabled ? 'on' : 'off');
-      status.textContent = ext.enabled ? 'Aktif' : 'Nonaktif';
-      actions.appendChild(status);
-    } else {
-      actions.appendChild(button('Install', 'primary small', async () => {
+    } else if (kind === 'catalog') {
+      container.appendChild(makeButton('Install', 'primary small', async () => {
         const res = await api.extInstallBuiltin(ext.id);
         if (!res.ok) { toast(res.error || 'Gagal install'); return; }
         await refreshExtensions();
         toast('Terpasang: ' + ext.name);
       }));
+    } else {
+      container.appendChild(makeButton('Install', 'primary small', async () => {
+        await installOpenVsxExtension(ext.namespace, ext.name, ext.version);
+      }));
+      container.appendChild(makeButton('Open VSX', 'ghost small', async () => {
+        const res = await api.extOpenExternal(openVsxUrl(ext));
+        if (!res.ok) toast(res.error || 'Gagal membuka Open VSX');
+      }));
     }
-    card.appendChild(main);
-    card.appendChild(actions);
-    return card;
+  }
+
+  async function installOpenVsxExtension(namespace, name, version) {
+    const button = document.querySelector('#extUpdateAll');
+    const previous = button && button.textContent;
+    if (button) { button.disabled = true; button.textContent = 'Mengunduh...'; }
+    try {
+      const res = await api.extInstallOpenVsx({ namespace, name, version });
+      if (!res.ok) { toast(res.error || 'Gagal install dari Open VSX'); return; }
+      await refreshExtensions();
+      S.extSelected = res.id;
+      renderExtensions();
+      toast('Terpasang: ' + (res.name || name));
+    } finally {
+      if (button) { button.disabled = false; button.textContent = previous || ('Update semua (' + Object.keys(S.extUpdates).length + ')'); }
+    }
+  }
+
+  function selectExtension(id) {
+    S.extSelected = id;
+    renderExtensions();
+    renderExtensionDetail();
+  }
+
+  function extSideItem(ext, kind) {
+    const row = document.createElement('div');
+    row.className = 'ext-side-item' + (S.extSelected === ext.id ? ' selected' : '');
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
+    row.title = ext.id;
+
+    const icon = extIconHtml(ext, 'ext-icon');
+    const verified = ext.verified ? '<span class="ext-verified" title="Penerbit terverifikasi">✓</span>' : '';
+    const source = extensionSourceLabel(ext);
+    const update = S.extUpdates[ext.id];
+    const downloadText = ext.downloadCount ? formatDownloads(ext.downloadCount) : '';
+
+    row.innerHTML = icon
+      + '<div class="ext-side-main">'
+      + '<div class="ext-name-line"><span class="ext-name">' + esc(ext.name) + '</span>'
+      + (update ? '<span class="ext-version-update">v' + esc(update.latest) + '</span>' : '<span class="ext-version">v' + esc(ext.version || '1.0.0') + '</span>')
+      + '</div>'
+      + '<div class="ext-byline">' + verified + '<span>' + esc(ext.publisher || ext.namespace || 'unknown') + '</span><span>·</span><span>' + esc(source) + '</span>'
+      + (downloadText ? '<span class="ext-download">' + esc(downloadText) + '</span>' : '')
+      + '</div>'
+      + '<div class="ext-description">' + esc(ext.description || '') + '</div>'
+      + '</div>'
+      + '<div class="ext-row-action"></div>';
+
+    const action = row.querySelector('.ext-row-action');
+    if (kind === 'installed' && S.extUpdates[ext.id]) {
+      const source = ext.source || {};
+      const btn = document.createElement('button');
+      btn.className = 'primary small';
+      btn.textContent = 'Update';
+      btn.title = 'Update ke v' + S.extUpdates[ext.id].latest;
+      btn.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        btn.disabled = true;
+        await installOpenVsxExtension(source.namespace, source.name, S.extUpdates[ext.id].latest);
+      });
+      action.appendChild(btn);
+    } else if (kind === 'catalog') {
+      const btn = document.createElement('button');
+      btn.className = 'primary small';
+      btn.textContent = 'Install';
+      btn.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        btn.disabled = true;
+        const res = await api.extInstallBuiltin(ext.id);
+        btn.disabled = false;
+        if (!res.ok) { toast(res.error || 'Gagal install'); return; }
+        await refreshExtensions();
+      });
+      action.appendChild(btn);
+    } else if (kind === 'market') {
+      const btn = document.createElement('button');
+      btn.className = 'primary small';
+      btn.textContent = 'Install';
+      btn.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        btn.disabled = true;
+        await installOpenVsxExtension(ext.namespace, ext.name, ext.version);
+      });
+      action.appendChild(btn);
+    }
+    row.addEventListener('click', () => selectExtension(ext.id));
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        selectExtension(ext.id);
+      }
+    });
+    return row;
+  }
+
+  function updateAllButton() {
+    const count = Object.keys(S.extUpdates).length;
+    const btn = $('extUpdateAll');
+    if (!btn) return;
+    btn.classList.toggle('hidden', count === 0);
+    btn.textContent = 'Update semua (' + count + ')';
   }
 
   function renderExtensions() {
     const box = $('extList');
+    const status = $('extStatus');
     if (!box) return;
     box.innerHTML = '';
-    const term = ($('extSearch').value || '').toLowerCase().trim();
-    const match = (ext) => !term || (ext.id + ' ' + (ext.name || '') + ' ' + (ext.description || '')).toLowerCase().includes(term);
+    const query = S.extSearchTerm.toLowerCase().trim();
+    const match = (ext) => extMatches(ext, query);
+    const filter = S.extFilter || 'all';
     const installed = S.extensions.filter(match);
-    const available = S.extCatalog.filter((ext) => !ext.installed && match(ext));
-    if (!installed.length && !available.length) {
+    const catalog = S.extCatalog.filter((ext) => !ext.installed && match(ext));
+    const market = S.extMarket;
+    const updates = installed.filter((ext) => S.extUpdates[ext.id]);
+    const showInstalledSection = filter === 'all' || filter === 'installed' || filter === 'updates';
+    const showCatalogSection = filter === 'all' || filter === 'recommended' || filter === 'builtin';
+    const showMarketSection = filter === 'all' || filter === 'recommended';
+
+    const addGroup = (name, count) => {
+      const head = document.createElement('div');
+      head.className = 'ext-group';
+      head.textContent = count === undefined ? name : name + ' · ' + count;
+      box.appendChild(head);
+    };
+    if (showInstalledSection) {
+      const rows = filter === 'updates' ? updates : installed;
+      if (rows.length) {
+        addGroup(filter === 'updates' ? 'UPDATE TERSEDIA' : 'TERPASANG', rows.length);
+        for (const ext of rows) box.appendChild(extSideItem(ext, 'installed'));
+      }
+    }
+    if (showCatalogSection && catalog.length) {
+      addGroup('REKOMENDASI BAWAAN', catalog.length);
+      for (const ext of catalog) box.appendChild(extSideItem(ext, 'catalog'));
+    }
+    if (showMarketSection) {
+      addGroup(query ? 'OPEN VSX' : 'REKOMENDASI TERATAS', S.extMarketLoading ? 'mencari...' : market.length);
+      if (S.extMarketLoading) {
+        const note = document.createElement('div');
+        note.className = 'tree-empty';
+        note.textContent = 'Memuat ekstensi dari Open VSX...';
+        box.appendChild(note);
+      } else if (market.length) {
+        for (const ext of market) box.appendChild(extSideItem(ext, 'market'));
+      } else {
+        const note = document.createElement('div');
+        note.className = 'tree-empty';
+        note.textContent = 'Tidak ada ekstensi cocok di Open VSX.';
+        box.appendChild(note);
+      }
+    }
+    if (!box.children.length) {
       const empty = document.createElement('div');
       empty.className = 'tree-empty';
-      empty.textContent = S.extCatalog.length ? 'Tidak ada ekstensi yang cocok.' : 'Belum ada ekstensi. Klik Install folder atau Install .zip.';
+      if (filter === 'updates') empty.textContent = 'Semua ekstensi sudah terbaru.';
+      else if (query) empty.textContent = 'Tidak ada hasil untuk "' + query + '".';
+      else empty.textContent = 'Belum ada ekstensi. Klik Install atau cari di Open VSX.';
       box.appendChild(empty);
+    }
+    if (status) {
+      const enabled = S.extensions.filter((ext) => ext.enabled).length;
+      status.textContent = S.extensions.length + ' terpasang · ' + enabled + ' aktif · ' + Object.keys(S.extUpdates).length + ' update';
+    }
+    updateAllButton();
+  }
+
+  function renderExtensionDetail() {
+    const target = $('extDetail');
+    if (!target) return;
+    const ext = S.extSelected ? findExtension(S.extSelected) : null;
+    if (!ext) {
+      target.innerHTML = '<div class="ext-welcome"><div class="ext-welcome-icon"><svg viewBox="0 0 24 24"><path d="M10 3h4v3a2 2 0 1 0 4 0h3v4h-3a2 2 0 1 0 0 4h3v4h-4v-3a2 2 0 1 0-4 0v3h-4v-3a2 2 0 1 0-4 0v3H3v-4h3a2 2 0 1 0 0-4H3V6h3a2 2 0 1 0 4 0z"/></svg></div>'
+        + '<h1>Extensions</h1><p>Pasang snippet dan bahasa untuk mempercepat kerja.</p>'
+        + '<div class="ext-welcome-grid"><div class="ext-welcome-item"><strong>Cari</strong><span>Ketik nama bahasa, mis. python, php, react.</span></div>'
+        + '<div class="ext-welcome-item"><strong>Install</strong><span>Ambil langsung dari Open VSX atau dari file .zip.</span></div>'
+        + '<div class="ext-welcome-item"><strong>Update</strong><span>Informasi update muncul otomatis.</span></div></div></div>';
       return;
     }
-    if (installed.length) {
-      const head = document.createElement('div');
-      head.className = 'ext-group';
-      head.textContent = 'TERPASANG · ' + installed.length;
-      box.appendChild(head);
-      for (const ext of installed) box.appendChild(extCard(ext, 'installed'));
-    }
-    if (available.length) {
-      const head = document.createElement('div');
-      head.className = 'ext-group';
-      head.textContent = 'KATALOG BAWAAN';
-      box.appendChild(head);
-      for (const ext of available) box.appendChild(extCard(ext, 'catalog'));
-    }
+    const kind = extKindOf(ext);
+    const byline = (ext.verified ? '<span class="ext-verified-large">✓ Terverifikasi</span>' : '')
+      + '<span>' + esc(ext.publisher || ext.namespace || 'Unknown') + '</span>'
+      + '<span>·</span><span>' + esc(extensionSourceLabel(ext)) + '</span>';
+    const languages = (ext.contributes && ext.contributes.languages) ? Object.keys(ext.contributes.languages).slice(0, 12) : [];
+    const snippetScopes = ext.snippets ? Object.keys(ext.snippets) : Object.keys((ext.contributes && ext.contributes.snippets) || {});
+    target.innerHTML = '<div class="ext-detail-header">' + extIconHtml(ext, 'ext-icon-large')
+      + '<div class="ext-detail-title"><div class="ext-detail-name">' + esc(ext.name) + '</div>'
+      + '<div class="ext-detail-byline">' + byline + '</div></div>'
+      + '<div class="ext-detail-actions" id="extDetailActions"></div></div>'
+      + '<div class="ext-detail-stats">'
+      + '<div><label>Versi</label><strong>' + esc(ext.version || '-') + '</strong></div>'
+      + '<div><label>Download</label><strong>' + esc(formatDownloads(ext.downloadCount || 0)) + '</strong></div>'
+      + '<div><label>Rating</label><strong>' + esc(formatRating(ext.rating)) + '</strong></div>'
+      + '<div><label>Source</label><strong>' + esc(extensionSourceLabel(ext)) + '</strong></div>'
+      + '</div>'
+      + '<div class="ext-detail-section"><h2>Deskripsi</h2><p>' + esc(ext.description || 'Tidak ada deskripsi.') + '</p></div>'
+      + '<div class="ext-detail-section"><h2>Kontribusi</h2><div class="ext-contribute-list">'
+      + (languages.length ? languages.map((name) => '<span class="ext-badge">.' + esc(name) + '</span>').join('') : '<span class="muted">Tidak memetakan ekstensi file.</span>')
+      + (snippetScopes.length ? '<div class="ext-scopes"><label>Snippet</label><div>' + snippetScopes.map((scope) => '<span class="ext-badge">' + esc(scope) + '</span>').join('') + '</div></div>' : '')
+      + '</div></div>'
+      + '<div class="ext-detail-section"><h2>Kemampuan</h2><ul class="ext-detail-list"><li>Autocomplete berbasis snippet Ace</li><li>Pewarnaan sintaks untuk bahasa yang tersedia</li><li>Install/update/hapus tanpa restart penuh</li></ul></div>';
+    const actions = target.querySelector('#extDetailActions');
+    addExtAction(actions, ext, kind, false);
+  }
+
+  function scheduleMarketplaceSearch(query) {
+    const q = String(query || '').trim();
+    S.extSearchTerm = q;
+    clearTimeout(S.extSearchTimer);
+    S.extMarket = [];
+    S.extMarketLoading = q.length >= 2;
+    renderExtensions();
+    if (q.length < 2) return;
+    S.extSearchTimer = setTimeout(async () => {
+      const res = await api.extSearchOpenVsx(q);
+      if (S.extSearchTerm !== q) return;
+      S.extMarketLoading = false;
+      if (!res.ok) { toast(res.error || 'Gagal mencari di Open VSX'); renderExtensions(); return; }
+      S.extMarket = res.extensions || [];
+      renderExtensions();
+    }, 350);
+  }
+
+  async function loadRecommendedExtensions(force) {
+    if (!force && S.extMarketLoaded && S.extSearchTerm === '') return;
+    S.extMarketLoading = true;
+    S.extMarket = [];
+    renderExtensions();
+    const res = await api.extSearchOpenVsx('snippets');
+    S.extMarketLoading = false;
+    if (!res.ok) { toast(res.error || 'Gagal memuat Open VSX'); renderExtensions(); return; }
+    S.extMarketLoaded = true;
+    S.extMarket = res.extensions || [];
+    renderExtensions();
   }
 
   async function refreshExtensions() {
@@ -922,7 +1223,18 @@
     S.extensions = res.extensions || [];
     S.extCatalog = res.catalog || [];
     renderExtensions();
+    renderExtensionDetail();
     applyExtensions();
+    checkExtensionUpdates();
+  }
+
+  async function checkExtensionUpdates() {
+    const res = await api.extCheckUpdates();
+    if (!res.ok) return;
+    S.extUpdates = {};
+    for (const item of res.updates || []) S.extUpdates[item.id] = item;
+    renderExtensions();
+    renderExtensionDetail();
   }
 
   function applyExtensions() {
@@ -961,6 +1273,111 @@
     await refreshExtensions();
     toast('Terpasang: ' + (res.name || res.id) + ' v' + (res.version || ''));
     switchView('extensions');
+  }
+
+  // ---------- Explorer actions ----------
+  function targetFolder(node) {
+    return node.dir ? node.path : parentPathOf(node.path);
+  }
+
+  async function uploadInto(folder, mode) {
+    const res = await api.uploadEntry({ mode, dstTarget: currentTarget(), dstDir: folder });
+    if (res.canceled) return;
+    if (!res.ok) { toast(res.error || 'Gagal mengunggah'); return; }
+    await refreshExplorer();
+    toast((res.uploaded || []).length + ' item diunggah ke ' + folder);
+  }
+
+  async function downloadEntryFor(node) {
+    const res = await api.downloadEntry({
+      srcTarget: currentTarget(),
+      srcPath: node.path,
+      isDir: node.dir,
+      name: node.name
+    });
+    if (res.canceled) return;
+    if (!res.ok) { toast(res.error || 'Gagal mengunduh'); return; }
+    toast('Diunduh: ' + (res.path || node.name));
+  }
+
+  async function openInTerminal(node) {
+    if (!node.dir) { toast('Pilih folder untuk dibuka di terminal.'); return; }
+    if (S.target.type === 'local') {
+      switchView('workspace');
+      if (S.terms.local.id) await api.stopTerminal(S.terms.local.id);
+      S.terms.local.id = null;
+      await startLocalTerminal(node.path);
+      toast('Terminal dibuka di ' + node.path);
+      return;
+    }
+    if (S.target.type !== 'ssh') { toast('Terminal remote hanya tersedia untuk SSH.'); return; }
+    switchView('workspace');
+    ensureWorkspace();
+    const safe = String(node.path).replace(/'/g, `'\\''`);
+    const command = `cd '${safe}'\r`;
+    setTimeout(() => {
+      if (S.terms.remote && S.terms.remote.sessionId) api.remoteInput(S.target.id, command);
+    }, 500);
+    toast('Terminal SSH dibuka di ' + node.path);
+  }
+
+  function openMapDrive(node) {
+    if (!node.dir) { toast('Pilih folder VPS untuk map drive.'); return; }
+    if (S.target.type !== 'ssh') { toast('Map drive VPS hanya tersedia untuk koneksi SSH/SFTP.'); return; }
+    const conn = S.connections.find((item) => item.id === S.target.id) || {};
+    S.mapTarget = node.path;
+    $('mapDrivePath').textContent = node.path;
+    $('mapMethod').value = 'rclone';
+    $('mapNetworkMode').checked = true;
+    $('mapCacheMode').value = 'full';
+    $('mapHost').value = conn.host || '';
+    $('mapPort').value = conn.port || 22;
+    $('mapUser').value = conn.username || '';
+    $('mapPassword').value = '';
+    $('mapKey').value = '';
+    $('mapUnc').value = conn.host ? '\\\\' + conn.host + '\\share\\' + node.path.replace(/^\/+/, '').replace(/\//g, '\\') : '';
+    $('mapSmbUser').value = conn.username || '';
+    $('mapSmbPassword').value = '';
+    $('mapHint').textContent = '';
+    $('mapRcloneSection').classList.remove('hidden');
+    $('mapSmbSection').classList.add('hidden');
+    $('mapModal').classList.remove('hidden');
+    setTimeout(() => $('mapHost').focus(), 60);
+  }
+
+  function closeMapDrive() {
+    $('mapModal').classList.add('hidden');
+    S.mapTarget = null;
+  }
+
+  async function submitMapDrive() {
+    const method = $('mapMethod').value;
+    const drive = $('mapDriveLetter').value;
+    const submit = $('mapSubmit');
+    submit.disabled = true;
+    submit.textContent = 'Membuat drive...';
+    const payload = { method, drive, remotePath: S.mapTarget, networkMode: $('mapNetworkMode').checked };
+
+    if (method === 'rclone') {
+      payload.host = $('mapHost').value.trim();
+      payload.port = Number($('mapPort').value) || 22;
+      payload.username = $('mapUser').value.trim();
+      payload.password = $('mapPassword').value;
+      payload.privateKey = $('mapKey').value.trim();
+      payload.cacheMode = $('mapCacheMode').value;
+    } else {
+      payload.unc = $('mapUnc').value.trim();
+      payload.username = $('mapSmbUser').value.trim();
+      payload.password = $('mapSmbPassword').value;
+      payload.persistent = $('mapPersistent').checked;
+    }
+
+    const res = await api.mapDrive(payload);
+    submit.disabled = false;
+    submit.textContent = 'Map drive';
+    if (!res.ok) { $('mapHint').textContent = res.error || 'Gagal membuat drive'; return; }
+    toast('Drive ' + drive + ': terpasang');
+    closeMapDrive();
   }
 
   // ---------- Terminal ----------
@@ -1416,9 +1833,39 @@
     document.addEventListener('click', hideContextMenu);
     document.addEventListener('scroll', hideContextMenu, true);
 
-    $('extSearch').addEventListener('input', renderExtensions);
+    $('extSearch').addEventListener('input', (e) => scheduleMarketplaceSearch(e.target.value));
+    $('downloadRclone')?.addEventListener('click', () => api.extOpenExternal('https://rclone.org/downloads/'));
+    $('downloadWinFsp')?.addEventListener('click', () => api.extOpenExternal('https://github.com/winfsp/winfsp/releases'));
+    $('mapCancel').addEventListener('click', closeMapDrive);
+    $('mapModal').addEventListener('click', (e) => { if (e.target.id === 'mapModal') closeMapDrive(); });
+    $('mapSubmit').addEventListener('click', submitMapDrive);
+    $('mapMethod').addEventListener('change', () => {
+      const method = $('mapMethod').value;
+      $('mapRcloneSection').classList.toggle('hidden', method !== 'rclone');
+      $('mapSmbSection').classList.toggle('hidden', method !== 'smb');
+      $('mapHint').textContent = '';
+    });
+    $('extFilter').addEventListener('change', (e) => { S.extFilter = e.target.value; renderExtensions(); });
+    $('extRefreshSide').addEventListener('click', async () => {
+      await refreshExtensions();
+      if (S.extSearchTerm === '') await loadRecommendedExtensions(true);
+      toast('Daftar ekstensi diperbarui');
+    });
     $('extInstallFolder').addEventListener('click', () => installExtension('folder'));
     $('extInstallZip').addEventListener('click', () => installExtension('zip'));
+    $('extUpdateAll').addEventListener('click', async () => {
+      const btn = $('extUpdateAll');
+      btn.disabled = true;
+      const previous = btn.textContent;
+      btn.textContent = 'Memperbarui...';
+      const res = await api.extUpdateAll();
+      btn.disabled = false;
+      if (!res.ok) { toast(res.error || 'Gagal update ekstensi'); btn.textContent = previous; return; }
+      await refreshExtensions();
+      const okCount = (res.results || []).filter((r) => r.ok).length;
+      const failCount = (res.results || []).filter((r) => !r.ok).length;
+      toast(failCount ? `${okCount} ekstensi diperbarui, ${failCount} gagal` : `${okCount || 0} ekstensi diperbarui`);
+    });
     $('extOpenDir').addEventListener('click', async () => {
       const res = await api.extOpenDir();
       if (!res.ok) toast(res.error || 'Gagal membuka folder ekstensi');
@@ -1484,6 +1931,7 @@
       }
       if (e.key === 'Escape') {
         hideContextMenu();
+        if (!$('mapModal').classList.contains('hidden')) closeMapDrive();
         if (!$('promptModal').classList.contains('hidden')) closePrompt(null);
         if (!$('cloneModal').classList.contains('hidden')) $('cloneModal').classList.add('hidden');
         if (!$('settingsModal').classList.contains('hidden')) $('settingsModal').classList.add('hidden');

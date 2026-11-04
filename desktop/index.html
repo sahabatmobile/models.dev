@@ -2,7 +2,7 @@
 <html lang="id">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; font-src 'self' data:;" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://open-vsx.org https://openvsx.eclipsecontent.org; connect-src 'none'; font-src 'self' data:;" />
   <title>SahabatMobile Desktop</title>
   <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="vendor/xterm/xterm.css" />
@@ -53,6 +53,36 @@
           <button id="disconnectRemote" class="ghost small hidden">Disconnect</button>
         </div>
         <div class="side-status" id="sideStatus">Siap</div>
+      </div>
+
+      <div id="extensionPane" class="side-section hidden">
+        <div class="side-title ext-title-row">
+          <span>EXTENSIONS</span>
+          <div class="side-actions">
+            <button id="extRefreshSide" class="icon-btn" title="Muat ulang">⟳</button>
+          </div>
+        </div>
+        <div class="ext-search-row">
+          <div class="ext-search-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><line x1="15.5" y1="15.5" x2="21" y2="21"/></svg>
+          </div>
+          <input id="extSearch" placeholder="Search Extensions" autocomplete="off" />
+        </div>
+        <select id="extFilter" class="ext-filter" aria-label="Filter ekstensi">
+          <option value="all">Semua ekstensi</option>
+          <option value="installed">Terpasang</option>
+          <option value="updates">Update tersedia</option>
+          <option value="recommended">Rekomendasi</option>
+          <option value="builtin">Katalog bawaan</option>
+        </select>
+        <div id="extList" class="ext-side-list"></div>
+        <div class="quick-actions ext-footer-actions">
+          <button id="extInstallFolder" class="ghost small">Install dari folder</button>
+          <button id="extInstallZip" class="ghost small">Install dari .zip</button>
+          <button id="extUpdateAll" class="ghost small hidden">Update semua</button>
+          <button id="extOpenDir" class="ghost small">Buka folder ekstensi</button>
+        </div>
+        <div class="side-status ext-bottom-status" id="extStatus">Tidak ada ekstensi</div>
       </div>
 
       <div id="connectionPane" class="side-section hidden">
@@ -208,20 +238,7 @@
       </section>
 
       <section id="view-extensions" class="view hidden">
-        <div class="panel">
-          <h2>Extensions</h2>
-          <p class="muted">Pasang paket snippet &amp; bahasa. Bisa dari katalog bawaan, folder, atau arsip <code>.zip</code> yang berisi <code>extension.json</code>.</p>
-          <div class="field-row">
-            <div class="field grow">
-              <label>Cari ekstensi</label>
-              <input id="extSearch" placeholder="mis. python, php, web" />
-            </div>
-            <button id="extInstallFolder" class="ghost">Install folder</button>
-            <button id="extInstallZip" class="ghost">Install .zip</button>
-            <button id="extOpenDir" class="ghost">Buka folder</button>
-          </div>
-          <div id="extList" class="ext-list"></div>
-        </div>
+        <div id="extDetail" class="ext-detail"></div>
       </section>
     </div>
   </div>
@@ -266,6 +283,77 @@
   </div>
 
   <div id="contextMenu" class="context-menu hidden"></div>
+
+  <div id="mapModal" class="modal hidden">
+    <div class="modal-card map-card">
+      <h3>Map Drive VPS</h3>
+      <p class="muted small" id="mapDrivePath">/</p>
+      <label>Metode
+        <select id="mapMethod">
+          <option value="rclone">rclone + WinFsp (SFTP)</option>
+          <option value="smb">SMB share (net use)</option>
+        </select>
+      </label>
+      <div class="map-grid">
+        <label>Drive
+          <select id="mapDriveLetter">
+            <option value="G">G:</option><option value="H">H:</option><option value="I">I:</option><option value="J">J:</option><option value="K">K:</option><option value="L">L:</option><option value="M">M:</option><option value="N">N:</option><option value="O">O:</option><option value="P">P:</option><option value="Q">Q:</option><option value="R">R:</option><option value="S">S:</option><option value="T">T:</option><option value="U">U:</option><option value="V">V:</option><option value="W">W:</option><option value="X">X:</option><option value="Y">Y:</option><option value="Z">Z:</option>
+          </select>
+        </label>
+        <label class="mini-check map-mode"><input id="mapNetworkMode" type="checkbox" checked /> Mount sebagai network drive</label>
+      </div>
+      <div id="mapRcloneSection" class="map-section">
+        <div class="map-grid">
+          <label>Host
+            <input id="mapHost" placeholder="103.150.1.2" required />
+          </label>
+          <label>Port
+            <input id="mapPort" type="number" value="22" />
+          </label>
+        </div>
+        <label>Username
+          <input id="mapUser" placeholder="root" autocomplete="username" />
+        </label>
+        <label>Password
+          <input id="mapPassword" type="password" autocomplete="current-password" placeholder="Kosongkan untuk pakai SSH agent / private key" />
+        </label>
+        <label>Private Key Path
+          <input id="mapKey" placeholder="C:\Users\...\.ssh\id_rsa" />
+        </label>
+        <label>Cache mode
+          <select id="mapCacheMode">
+            <option value="full">Full cache</option>
+            <option value="writes">Writes only</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
+        <p class="hint">Host key tidak diverifikasi pada mount. Untuk hanya membaca/menulis aplikasi biasa, pakai Full cache.</p>
+        <div class="map-downloads">
+          <span class="muted small">Tool dibutuhkan:</span>
+          <button id="downloadRclone" class="ghost small">Download rclone</button>
+          <button id="downloadWinFsp" class="ghost small">Download WinFsp</button>
+        </div>
+      </div>
+      <div id="mapSmbSection" class="map-section hidden">
+        <label>UNC Share
+          <input id="mapUnc" placeholder="\\110.10.20.30\share\folder" />
+        </label>
+        <label>Username
+          <input id="mapSmbUser" placeholder="DOMAIN\\user atau user" autocomplete="username" />
+        </label>
+        <label>Password
+          <input id="mapSmbPassword" type="password" autocomplete="current-password" />
+        </label>
+        <label class="mini-check"><input id="mapPersistent" type="checkbox" /> Buat persistent saat login</label>
+        <p class="hint">Metode ini memakai Windows <code>net use</code>; VPS harus menyediakan SMB share.</p>
+      </div>
+      <p id="mapHint" class="hint"></p>
+      <div class="modal-actions">
+        <button id="mapCancel" class="ghost">Batal</button>
+        <button id="mapSubmit" class="primary">Map drive</button>
+      </div>
+    </div>
+  </div>
 
   <div id="cloneModal" class="modal hidden">
     <div class="modal-card">

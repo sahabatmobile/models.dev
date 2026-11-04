@@ -18,7 +18,9 @@ Tahap saat ini: **mode Developer**. Mode UMKM dan 3D Creator disiapkan sebagai t
 - Panel kiri dan panel Agent di kanan bisa **digeser** (double-click handle untuk reset ke ukuran default)
 - **Editor kode** (Ace) dengan tab, pewarnaan sintaks, simpan `Ctrl+S`, cari/ganti `Ctrl+F`, dan ke baris `Ctrl+G`
 - **Context menu Explorer**: copy/cut/paste, rename, move, copy path, new file/folder, delete
-- **Extensions**: pasang paket snippet &amp; bahasa dari katalog bawaan, folder, atau arsip `.zip` (`Settings → Extensions`)
+- **Extensions ala VS Code**: daftar sidebar dengan icon, filter, dan detail ekstensi; cari &amp; pasang langsung dari **Open VSX**, update satu/semua, atau install paket bawaan, folder, atau arsip `.zip`/VSIX
+- **Explorer context menu**: upload/download file atau folder, copy/cut/paste, rename, move, copy path, new file/folder, refresh
+- **Buka di terminal** dari Explorer folder lokal atau SSH
 - Tema editor bisa dipilih di **Pengaturan → Tema editor**
 - **Terminal** lokal (PowerShell) dan terminal SSH
 - **Agent AI** yang bekerja pada explorer **aktif**:
@@ -26,8 +28,11 @@ Tahap saat ini: **mode Developer**. Mode UMKM dan 3D Creator disiapkan sebagai t
   - Bisa menjalankan perintah (dengan konfirmasi)
   - Mendukung folder **lokal**, **SSH/SFTP**, dan **FTP/FTPS**
 - **Remote**: SSH/SFTP untuk terminal + file, FTP/FTPS untuk file. Kredensial tidak disimpan.
+- **Map drive VPS**: mount folder SSH/SFTP sebagai drive Windows (mis. `G:`) melalui **rclone + WinFsp**, atau mount SMB share via **net use**. Install rclone dan WinFsp terlebih dahulu, lalu klik kanan folder VPS → **Map drive**.
 
 Untuk agent / tool calling, gunakan **MiniMax-M3**.
+
+> Ekstensi Open VSX yang dapat dijalankan saat ini adalah paket **snippets / language / snippets + language mapping**. Ekstensi VS Code yang membutuhkan API penuh (commands, views, debug, dll.) tidak akan berjalan dan akan ditolak dengan pesan yang jelas.
 
 ## Menjalankan
 
