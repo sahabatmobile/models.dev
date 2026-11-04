@@ -493,6 +493,7 @@
   function updateExplorerChrome() {
     const remote = S.target.type !== 'local';
     $('disconnectRemote').classList.toggle('hidden', !remote);
+    $('mapDriveTop').classList.toggle('hidden', S.target.type !== 'ssh');
     $('openFolder').classList.toggle('hidden', remote);
     $('cloneRepo').classList.toggle('hidden', remote);
     $('newFile').disabled = false;
@@ -556,7 +557,11 @@
     $('connUser').value = '';
     $('connPassword').value = '';
     $('connKey').value = '';
+    $('connName').value = '';
+    $('connSave').checked = true;
+    $('connPassphrase').value = '';
     $('connKeyField').classList.remove('hidden');
+    $('connPassphraseField').classList.remove('hidden');
     setTimeout(() => $('connHost').focus(), 60);
   }
 
@@ -573,21 +578,94 @@
     btn.textContent = 'Menghubungkan...';
     const res = await api.remoteConnect({
       protocol,
+      name: $('connName').value.trim(),
       host: $('connHost').value.trim(),
       port: Number($('connPort').value) || (protocol === 'sftp' ? 22 : 21),
       username: $('connUser').value.trim(),
       password: $('connPassword').value,
+      passphrase: $('connPassphrase').value,
       authType: protocol === 'sftp' && $('connKey').value.trim() ? 'key' : 'password',
-      privateKey: $('connKey').value.trim()
+      privateKey: $('connKey').value.trim(),
+      saveConnection: $('connSave').checked
     });
     btn.disabled = false;
     btn.textContent = 'Hubungkan';
     if (!res.ok) { toast('Koneksi gagal: ' + (res.error || 'unknown')); return; }
-    const conn = { id: res.id, type: res.type, label: res.label, home: res.home, dir: res.home, host: res.host, port: res.port, username: res.username };
+    const conn = { id: res.id, type: res.type, label: res.label, home: res.home, dir: res.home, host: res.host, port: res.port, username: res.username, savedId: res.saved && res.saved.id };
+    S.connections.push(conn);
+    S.remotes.set(res.id, conn);
+    if (res.saved) toast('Koneksi tersimpan: ' + res.saved.name);
+    renderTargetSelect();
+    closeConnectionForm();
+    await switchTarget(res.id);
+    switchView('workspace');
+    toast('Terhubung: ' + res.label);
+  }
+
+  function openSavedConnections() {
+    renderSavedConnections();
+    $('connectionsModal').classList.remove('hidden');
+  }
+
+  function closeSavedConnections() {
+    $('connectionsModal').classList.add('hidden');
+  }
+
+  async function renderSavedConnections() {
+    const box = $('connectionsList');
+    box.innerHTML = '<div class="tree-empty">Memuat koneksi...</div>';
+    const res = await api.listConnections();
+    if (!res.ok) {
+      box.innerHTML = '<div class="tree-empty">Gagal memuat: ' + esc(res.error || 'unknown') + '</div>';
+      return;
+    }
+    box.innerHTML = '';
+    const items = res.connections || [];
+    if (!items.length) {
+      box.innerHTML = '<div class="tree-empty">Belum ada koneksi tersimpan. Isi form “Koneksi baru” dan centang Simpan.</div>';
+      return;
+    }
+    for (const item of items) {
+      const card = document.createElement('div');
+      card.className = 'connection-item';
+      const protocol = item.protocol.toUpperCase();
+      const auth = item.authType === 'key' ? 'Private key' + (item.privateKeyName ? ' · ' + item.privateKeyName : '') : (item.hasPassword ? 'Password' : 'Tanpa password');
+      const last = item.lastConnected ? ' · Terakhir dipakai: ' + new Date(item.lastConnected).toLocaleString('id-ID') : '';
+      card.innerHTML = '<div class="connection-main"><strong>' + esc(item.name) + '</strong><span>' + esc(protocol + ' ' + item.username + '@' + item.host + ':' + item.port) + '</span><small>' + esc(auth + last) + '</small></div>';
+      const actions = document.createElement('div');
+      actions.className = 'connection-actions';
+      const connect = document.createElement('button');
+      connect.className = 'primary small';
+      connect.textContent = 'Hubungkan';
+      connect.addEventListener('click', async () => {
+        connect.disabled = true;
+        await connectSavedProfile(item.id);
+      });
+      const remove = document.createElement('button');
+      remove.className = 'ghost small danger';
+      remove.textContent = 'Hapus';
+      remove.addEventListener('click', async () => {
+        if (!confirm('Hapus koneksi "' + item.name + '" dari penyimpanan?')) return;
+        const result = await api.removeConnection(item.id);
+        if (!result.ok) { toast(result.error || 'Gagal menghapus koneksi'); return; }
+        await renderSavedConnections();
+        toast('Koneksi dihapus');
+      });
+      actions.appendChild(connect);
+      actions.appendChild(remove);
+      card.appendChild(actions);
+      box.appendChild(card);
+    }
+  }
+
+  async function connectSavedProfile(id) {
+    const res = await api.connectSaved(id);
+    if (!res.ok) { toast('Koneksi gagal: ' + (res.error || 'unknown')); return; }
+    const conn = { id: res.id, type: res.type, label: res.label, home: res.home, dir: res.home, host: res.host, port: res.port, username: res.username, savedId: id };
     S.connections.push(conn);
     S.remotes.set(res.id, conn);
     renderTargetSelect();
-    closeConnectionForm();
+    closeSavedConnections();
     await switchTarget(res.id);
     switchView('workspace');
     toast('Terhubung: ' + res.label);
@@ -1321,12 +1399,17 @@
     toast('Terminal SSH dibuka di ' + node.path);
   }
 
+  function syncMapDrivePathLabel() {
+    $('mapDrivePath').textContent = $('mapRoot').checked ? '/' : (S.mapTarget || '/');
+  }
+
   function openMapDrive(node) {
-    if (!node.dir) { toast('Pilih folder VPS untuk map drive.'); return; }
+    if (node && !node.dir) { toast('Pilih folder VPS untuk map drive.'); return; }
     if (S.target.type !== 'ssh') { toast('Map drive VPS hanya tersedia untuk koneksi SSH/SFTP.'); return; }
     const conn = S.connections.find((item) => item.id === S.target.id) || {};
-    S.mapTarget = node.path;
-    $('mapDrivePath').textContent = node.path;
+    S.mapTarget = node ? node.path : '/';
+    $('mapRoot').checked = true;
+    syncMapDrivePathLabel();
     $('mapMethod').value = 'rclone';
     $('mapNetworkMode').checked = true;
     $('mapCacheMode').value = 'full';
@@ -1335,7 +1418,7 @@
     $('mapUser').value = conn.username || '';
     $('mapPassword').value = '';
     $('mapKey').value = '';
-    $('mapUnc').value = conn.host ? '\\\\' + conn.host + '\\share\\' + node.path.replace(/^\/+/, '').replace(/\//g, '\\') : '';
+    $('mapUnc').value = conn.host ? '\\\\' + conn.host + '\\share' + (node && node.path ? '\\' + node.path.replace(/^\/+/, '').replace(/\//g, '\\') : '') : '';
     $('mapSmbUser').value = conn.username || '';
     $('mapSmbPassword').value = '';
     $('mapHint').textContent = '';
@@ -1356,7 +1439,7 @@
     const submit = $('mapSubmit');
     submit.disabled = true;
     submit.textContent = 'Membuat drive...';
-    const payload = { method, drive, remotePath: S.mapTarget, networkMode: $('mapNetworkMode').checked };
+    const payload = { method, drive, remotePath: $('mapRoot').checked ? '/' : (S.mapTarget || '/'), networkMode: $('mapNetworkMode').checked };
 
     if (method === 'rclone') {
       payload.host = $('mapHost').value.trim();
@@ -1818,6 +1901,7 @@
       const proto = $('connProtocol').value;
       $('connPort').value = proto === 'sftp' ? '22' : '21';
       $('connKeyField').classList.toggle('hidden', proto !== 'sftp');
+      $('connPassphraseField').classList.toggle('hidden', proto !== 'sftp');
     });
     $('disconnectRemote').addEventListener('click', disconnectRemote);
     $('openFolder').addEventListener('click', openFolder);
@@ -1844,6 +1928,13 @@
       $('mapRcloneSection').classList.toggle('hidden', method !== 'rclone');
       $('mapSmbSection').classList.toggle('hidden', method !== 'smb');
       $('mapHint').textContent = '';
+    });
+    $('mapRoot').addEventListener('change', syncMapDrivePathLabel);
+    $('mapDriveTop').addEventListener('click', () => openMapDrive(null));
+    $('savedConnections').addEventListener('click', openSavedConnections);
+    $('closeConnections').addEventListener('click', closeSavedConnections);
+    $('connectionsModal').addEventListener('click', (e) => {
+      if (e.target.id === 'connectionsModal') closeSavedConnections();
     });
     $('extFilter').addEventListener('change', (e) => { S.extFilter = e.target.value; renderExtensions(); });
     $('extRefreshSide').addEventListener('click', async () => {
@@ -1932,6 +2023,7 @@
       if (e.key === 'Escape') {
         hideContextMenu();
         if (!$('mapModal').classList.contains('hidden')) closeMapDrive();
+        if (!$('connectionsModal').classList.contains('hidden')) closeSavedConnections();
         if (!$('promptModal').classList.contains('hidden')) closePrompt(null);
         if (!$('cloneModal').classList.contains('hidden')) $('cloneModal').classList.add('hidden');
         if (!$('settingsModal').classList.contains('hidden')) $('settingsModal').classList.add('hidden');

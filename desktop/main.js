@@ -22,6 +22,98 @@ let termSeq = 0;
 let remoteSeq = 0;
 let allowAgentCommands = false;
 
+function encryptSecret(value) {
+  const text = String(value || '');
+  if (!text) return null;
+  if (!safeStorage.isEncryptionAvailable()) return null;
+  return { enc: true, value: safeStorage.encryptString(text).toString('base64') };
+}
+
+function decryptSecret(value) {
+  if (!value || !value.value) return '';
+  try {
+    const buf = Buffer.from(value.value, 'base64');
+    return value.enc ? safeStorage.decryptString(buf) : buf.toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+function connectionPublic(p) {
+  return {
+    id: p.id,
+    name: p.name,
+    protocol: p.protocol,
+    host: p.host,
+    port: p.port,
+    username: p.username,
+    authType: p.authType,
+    privateKeyName: p.privateKey ? path.basename(p.privateKey) : '',
+    hasPassword: Boolean(p.password),
+    hasPassphrase: Boolean(p.passphrase),
+    lastConnected: p.lastConnected || null
+  };
+}
+
+function readConnections() {
+  const s = readSettings();
+  const list = Array.isArray(s.connections) ? s.connections : [];
+  return list.map((p) => ({
+    ...p,
+    passwordValue: decryptSecret(p.password),
+    passphraseValue: decryptSecret(p.passphrase)
+  }));
+}
+
+function readConnectionProfile(id) {
+  return readConnections().find((p) => p.id === id) || null;
+}
+
+function writeConnections(profiles) {
+  const s = readSettings();
+  s.connections = profiles;
+  writeSettings(s);
+}
+
+function saveConnectionProfile(cfg) {
+  const s = readSettings();
+  const list = Array.isArray(s.connections) ? s.connections : [];
+  const id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const protocol = cfg.protocol === 'ftp' || cfg.protocol === 'ftps' ? cfg.protocol : 'sftp';
+  const username = String(cfg.username || '').trim();
+  const host = String(cfg.host || '').trim();
+  const profile = {
+    id,
+    name: String(cfg.name || '').trim() || (protocol.toUpperCase() + ' ' + username + '@' + host),
+    protocol,
+    host,
+    port: Number(cfg.port) || (protocol === 'sftp' ? 22 : 21),
+    username,
+    authType: cfg.authType === 'key' ? 'key' : 'password',
+    privateKey: cfg.privateKey ? String(cfg.privateKey).trim() : '',
+    password: encryptSecret(cfg.password),
+    passphrase: encryptSecret(cfg.passphrase),
+    lastConnected: new Date().toISOString()
+  };
+  list.unshift(profile);
+  writeConnections(list.slice(0, 30));
+  return connectionPublic(profile);
+}
+
+function updateConnectionLastConnected(id) {
+  const s = readSettings();
+  const list = Array.isArray(s.connections) ? s.connections : [];
+  let changed = false;
+  for (const profile of list) {
+    if (profile.id === id) {
+      profile.lastConnected = new Date().toISOString();
+      changed = true;
+      break;
+    }
+  }
+  if (changed) writeConnections(list);
+}
+
 function settingsFile() {
   return path.join(app.getPath('userData'), 'settings.json');
 }
@@ -1079,6 +1171,16 @@ function createWindow() {
             out.treeMenu = Array.from(document.querySelectorAll('#contextMenu .context-item')).map(b => b.textContent);
             document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
             out.mapModal = !!document.querySelector('#mapModal');
+            out.mapRoot = !!document.querySelector('#mapRoot');
+            out.mapDriveTop = !!document.querySelector('#mapDriveTop');
+            out.connectionsModal = !!document.querySelector('#connectionsModal');
+            out.savedConnectionsButton = !!document.querySelector('#savedConnections');
+            const savedList = await window.sahabat.listConnections();
+            out.savedList = savedList.ok ? savedList.connections.length : -1;
+            const missingSaved = await window.sahabat.connectSaved('smoke-missing-id');
+            out.missingSavedError = missingSaved.error || '';
+            const smbValidation = await window.sahabat.mapDrive({ method: 'bogus', drive: 'Z', remotePath: '/', username: 'smoke' });
+            out.smbValidationError = smbValidation.error || '';
             out.uploadApi = typeof window.sahabat.uploadEntry;
             out.downloadApi = typeof window.sahabat.downloadEntry;
             out.mapApi = typeof window.sahabat.mapDrive;
@@ -1992,7 +2094,7 @@ ipcMain.handle('term:stop', (event, id) => {
   return { ok: true };
 });
 
-ipcMain.handle('remote:connect', async (event, cfg) => {
+async function openRemoteConnection(cfg) {
   const id = 'r' + (++remoteSeq);
   const host = String(cfg.host || '').trim();
   const username = String(cfg.username || '').trim();
@@ -2055,6 +2157,52 @@ ipcMain.handle('remote:connect', async (event, cfg) => {
     return { ok: true, id, home, type: 'ssh', label: 'SSH ' + username + '@' + host, host, port, username };
   } catch (err) {
     try { client.end(); } catch {}
+    return { ok: false, error: err.message };
+  }
+}
+
+ipcMain.handle('remote:connect', async (event, cfg) => {
+  const result = await openRemoteConnection(cfg);
+  if (!result.ok) return result;
+  if (cfg && cfg.saveConnection) {
+    const saved = saveConnectionProfile(cfg);
+    return { ...result, saved };
+  }
+  return result;
+});
+
+ipcMain.handle('remote:connectSaved', async (event, id) => {
+  const profile = readConnectionProfile(id);
+  if (!profile) return { ok: false, error: 'Koneksi tersimpan tidak ditemukan.' };
+  const result = await openRemoteConnection({
+    protocol: profile.protocol,
+    host: profile.host,
+    port: profile.port,
+    username: profile.username,
+    authType: profile.authType,
+    privateKey: profile.privateKey,
+    password: profile.passwordValue,
+    passphrase: profile.passphraseValue
+  });
+  if (!result.ok) return result;
+  updateConnectionLastConnected(id);
+  return { ...result, saved: connectionPublic(profile) };
+});
+
+ipcMain.handle('connections:list', () => {
+  const s = readSettings();
+  const list = Array.isArray(s.connections) ? s.connections : [];
+  return { ok: true, connections: list.map(connectionPublic) };
+});
+
+ipcMain.handle('connections:remove', (event, id) => {
+  try {
+    const s = readSettings();
+    const list = Array.isArray(s.connections) ? s.connections : [];
+    s.connections = list.filter((p) => p.id !== id);
+    writeSettings(s);
+    return { ok: true };
+  } catch (err) {
     return { ok: false, error: err.message };
   }
 });

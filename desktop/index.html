@@ -43,6 +43,7 @@
         </div>
         <div class="target-bar">
           <select id="targetSelect" title="Target explorer"></select>
+          <button id="mapDriveTop" class="icon-btn hidden" title="Map drive VPS ke Windows"><svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 12h2M16 12h2M10 17v2M14 17v2"/></svg></button>
           <button id="newConnection" class="icon-btn" title="Koneksi SSH / FTP baru">＋</button>
         </div>
         <div class="root-path small muted" id="wsRoot">Belum ada folder</div>
@@ -50,6 +51,7 @@
         <div class="quick-actions">
           <button id="openFolder" class="ghost small">Open Folder</button>
           <button id="cloneRepo" class="ghost small">Clone Repo</button>
+          <button id="savedConnections" class="ghost small">Koneksi tersimpan</button>
           <button id="disconnectRemote" class="ghost small hidden">Disconnect</button>
         </div>
         <div class="side-status" id="sideStatus">Siap</div>
@@ -91,6 +93,9 @@
           <button id="closeConnection" class="icon-btn" title="Tutup">×</button>
         </div>
         <form id="connForm" class="conn-form">
+          <label>Nama koneksi
+            <input id="connName" placeholder="VPS Produksi" />
+          </label>
           <label>Protokol
             <select id="connProtocol">
               <option value="sftp">SSH / SFTP</option>
@@ -113,6 +118,10 @@
           <label id="connKeyField" class="hidden">Private Key
             <input id="connKey" placeholder="C:\Users\...\.ssh\id_rsa" />
           </label>
+          <label id="connPassphraseField" class="hidden">Passphrase Private Key
+            <input id="connPassphrase" type="password" placeholder="Kosongkan jika tidak ada" autocomplete="new-password" />
+          </label>
+          <label class="mini-check"><input id="connSave" type="checkbox" checked /> Simpan koneksi ini</label>
           <button type="submit" class="primary small" id="connSubmit">Hubungkan</button>
           <p class="hint" id="connHint">Password tidak disimpan. Untuk SSH bisa memakai private key.</p>
         </form>
@@ -288,6 +297,7 @@
     <div class="modal-card map-card">
       <h3>Map Drive VPS</h3>
       <p class="muted small" id="mapDrivePath">/</p>
+      <label class="mini-check"><input id="mapRoot" type="checkbox" checked /> Map seluruh VPS (mount <code>/</code>)</label>
       <label>Metode
         <select id="mapMethod">
           <option value="rclone">rclone + WinFsp (SFTP)</option>
@@ -351,6 +361,17 @@
       <div class="modal-actions">
         <button id="mapCancel" class="ghost">Batal</button>
         <button id="mapSubmit" class="primary">Map drive</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="connectionsModal" class="modal hidden">
+    <div class="modal-card connections-card">
+      <h3>Koneksi tersimpan</h3>
+      <p class="muted">Klik “Hubungkan” untuk langsung masuk tanpa mengetik ulang.</p>
+      <div id="connectionsList" class="connections-list"></div>
+      <div class="modal-actions">
+        <button id="closeConnections" class="ghost">Tutup</button>
       </div>
     </div>
   </div>

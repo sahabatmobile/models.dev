@@ -1595,3 +1595,64 @@ body.resizing {
 @media (max-width: 560px) {
   .map-grid { grid-template-columns: 1fr; }
 }
+
+/* saved connections */
+.connections-card {
+  width: min(640px, 100%);
+}
+.connections-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 55vh;
+  overflow-y: auto;
+  margin: 12px 0;
+}
+.connection-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+.connection-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 3px;
+}
+.connection-main strong {
+  font-size: 13px;
+}
+.connection-main span {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.connection-main small {
+  color: var(--muted);
+  line-height: 1.35;
+}
+.connection-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.connection-actions .danger {
+  color: #fca5a5;
+  border-color: #7f1d1d;
+}
+@media (max-width: 600px) {
+  .connection-item {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .connection-actions {
+    justify-content: flex-end;
+  }
+}
